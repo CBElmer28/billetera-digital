@@ -73,8 +73,8 @@ PUBLIC_ROUTES = [
     "/docs",
     "/openapi.json",
     "/api/v1/inbound-transfer",
-    "/bank/stats"  
-    "/p2p/check"  # <--- AGREGA ESTA LÍNEA
+    "/bank/stats",  
+    "/p2p/check" 
 ]
 
 
