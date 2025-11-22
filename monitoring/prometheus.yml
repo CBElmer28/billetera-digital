@@ -1,0 +1,35 @@
+# Archivo de configuración principal para Prometheus.
+
+global:
+  scrape_interval: 15s     # Intervalo por defecto para obtener métricas de los targets.
+  evaluation_interval: 15s # Intervalo para evaluar las reglas de alerta.
+
+# Especifica los archivos que contienen las reglas de alerta.
+# La ruta debe ser la que está DENTRO del contenedor de Prometheus.
+rule_files:
+  - "/etc/prometheus/alert_rules.yml"
+
+# Define los trabajos (jobs) de scrapeo para obtener métricas.
+scrape_configs:
+  # Un único job para todos nuestros microservicios.
+  - job_name: 'billetera_bank_a_services'
+    # Define estáticamente las direcciones (targets) de los servicios a monitorear.
+    # Se usan los nombres de servicio definidos en docker-compose y sus puertos INTERNOS.
+    static_configs:
+      - targets: [
+          'gateway_service:8080',    # Puerto interno 8080
+          'auth_service:8000',       # Puerto interno 8000
+          'balance_service:8000',    # Puerto interno 8000
+          'ledger_service:8000',     # Puerto interno 8000
+          'group_service:8000',      # Puerto interno 8000
+          'interbank_service:8000'   # Puerto interno 8000
+        ]
+    # Ruta estándar donde los servicios exponen sus métricas.
+    metrics_path: /metrics
+
+# Configura cómo Prometheus se comunica con Alertmanager para enviar alertas.
+alerting:
+  alertmanagers:
+    - static_configs:
+        # Dirección interna (nombre del servicio y puerto) de Alertmanager.
+        - targets: ['alertmanager:9093']

@@ -1,0 +1,9 @@
+# Dependencias de Python para el API Gateway Service.
+
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+httpx
+prometheus-client
+python-multipart

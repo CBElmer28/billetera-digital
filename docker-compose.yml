@@ -1,0 +1,294 @@
+# docker-compose.yml (Versión Final Corregida y Limpia)
+
+services:
+
+  # -------------------------
+  # BASES DE DATOS
+  # -------------------------
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    restart: always
+    environment:
+      # Estas variables son leídas desde el .env raíz (Billetera-Digital/.env)
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${DB_NAME}
+      MARIADB_USER: ${DB_USER}
+      MARIADB_PASSWORD: ${DB_PASS}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - wallet_net
+    healthcheck:
+      
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u${DB_USER}", "-p${DB_PASS}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cassandra1:
+    image: cassandra:4.1
+    container_name: cassandra1
+    restart: always
+    
+    ports:
+      - "9042:9042" 
+    environment:
+      - CASSANDRA_DC=dc1
+    volumes:
+      - cassandra1_data:/var/lib/cassandra
+    networks:
+      - wallet_net
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # -------------------------
+  # MICROSERVICIOS DE NEGOCIO
+  # -------------------------
+  auth_service:
+    build: ./auth_service
+    container_name: auth_service
+    restart: always
+    env_file: 
+      - ./auth_service/.env
+    ports:
+      - "8001:8000"
+    networks:
+      - wallet_net
+    depends_on:
+      mariadb:
+        condition: service_healthy 
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  balance_service:
+    build: ./balance_service
+    container_name: balance_service
+    restart: always
+    env_file: 
+      - ./balance_service/.env
+    ports:
+      - "8003:8000"
+    networks:
+      - wallet_net
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ledger_service:
+    build: ./ledger_service
+    container_name: ledger_service
+    restart: always
+    env_file: 
+      - ./ledger_service/.env
+    ports:
+      - "8002:8000"
+    networks:
+      - wallet_net
+    depends_on:
+      cassandra1:
+        condition: service_healthy
+      balance_service: 
+        condition: service_healthy
+    healthcheck: 
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  group_service:
+    build: ./group_service
+    container_name: group_service
+    restart: always
+    env_file: 
+      - ./group_service/.env
+    ports:
+      - "8004:8000"
+    networks:
+      - wallet_net
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  interbank_service:
+    build: ./interbank_service
+    container_name: interbank_service
+    restart: always
+    env_file: 
+      - ./interbank_service/.env
+    ports:
+      - "8090:8000"
+    networks:
+      - wallet_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --- API Gateway ---
+  gateway_service:
+    build: ./gateway_service
+    container_name: gateway_service
+    restart: always
+    environment: 
+      - AUTH_URL=http://auth_service:8000
+      - BALANCE_URL=http://balance_service:8000
+      - LEDGER_URL=http://ledger_service:8000
+      - GROUP_URL=http://group_service:8000
+    ports:
+      - "8080:8080"
+    networks:
+      - wallet_net
+    depends_on: 
+      auth_service:
+        condition: service_healthy
+      balance_service:
+        condition: service_healthy
+      ledger_service:
+        condition: service_healthy
+      group_service:
+        condition: service_healthy
+      interbank_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8080); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # -------------------------
+  # AUTOMATIZACIÓN Y MONITOREO
+  # -------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n_workflows:/home/node/n8n/workflows 
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=admin
+      - N8N_HOST=0.0.0.0
+      - WEBHOOK_URL=http://n8n:5678/ 
+      - N8N_EMAIL_MODE=smtp
+      - N8N_SMTP_HOST=mailhog
+      - N8N_SMTP_PORT=1025
+      - N8N_SMTP_SENDER=n8n@pixlmoney.local
+      - N8N_SMTP_SSL=false
+    networks:
+      - wallet_net
+    depends_on:
+      - mailhog
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: mailhog
+    restart: always
+    ports:
+      - "1025:1025" 
+      - "8025:8025" 
+    networks:
+      - wallet_net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro 
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - wallet_net
+    depends_on: 
+      - gateway_service 
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - wallet_net
+    depends_on:
+      - prometheus 
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    restart: always
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - wallet_net
+    depends_on:
+      - mailhog 
+
+  watchdog:
+    build: ./monitoring 
+    container_name: watchdog
+    restart: always
+    environment:
+      - N8N_RECOVERY_WEBHOOK_URL=http://n8n:5678/webhook/recovery
+      - CHECK_INTERVAL=60
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - wallet_net
+    depends_on:
+      - n8n
+      - gateway_service
+
+# -------------------------
+# RED Y VOLÚMENES NOMBRADOS
+# -------------------------
+networks:
+  wallet_net:
+    driver: bridge
+
+volumes:
+  mariadb_data:
+  cassandra1_data:
+  n8n_data:
+  grafana_data:

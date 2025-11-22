@@ -1,0 +1,85 @@
+{
+  "name": "Alert Notifier - Pixel Money",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "alert",
+        "responseMode": "onReceived",
+        "responseData": "{\"status\":\"ok\"}"
+      },
+      "id": "Webhook_Alert",
+      "name": "Alert Webhook Receiver",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "pixelmoney-alertmanager-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Procesa el payload de Alertmanager\nconst alerts = items[0].json.alerts || [];\nif (!alerts.length) {\n  console.log('Webhook recibido sin alertas activas.');\n  return []; // No procesar si no hay alertas\n}\n\n// Mapea cada alerta a un formato más simple\nreturn alerts.map(a => {\n  const summary = a.annotations?.summary || 'Sin resumen';\n  const description = a.annotations?.description || 'Sin descripción';\n  const instance = a.labels?.instance || 'Desconocido';\n  const status = a.status || 'N/A'; // 'firing' o 'resolved'\n  const severity = a.labels?.severity || 'N/A';\n  const alertname = a.labels?.alertname || 'Desconocido';\n  const startsAt = a.startsAt ? new Date(a.startsAt).toLocaleString('es-PE', { timeZone: 'America/Lima' }) : 'N/A';\n  const endsAt = a.endsAt ? new Date(a.endsAt).toLocaleString('es-PE', { timeZone: 'America/Lima' }) : 'N/A';\n\n  // Determina el emoji y el asunto según el estado\n  let subjectPrefix = status === 'firing' ? 'ALERTA:' : 'RESUELTO:';\n  let stateEmoji = status === 'firing' ? '🔥' : '✔️';\n\n  return {\n    json: {\n      serviceInstance: instance,\n      alertName: alertname,\n      status: status,\n      severity: severity,\n      summary: summary,\n      description: description,\n      startsAt_local: startsAt,\n      endsAt_local: endsAt,\n      subject: `${subjectPrefix} ${alertname} en ${instance}`,\n      emailBody: \n`Estado: ${stateEmoji} ${status.toUpperCase()}\\n\\\nSeveridad: ${severity.toUpperCase()}\\n\\\nAlerta: ${alertname}\\n\\\nInstancia: ${instance}\\n\\\nInicio (Lima): ${startsAt}\\n\\\n${status === 'resolved' ? 'Fin (Lima): ' + endsAt + '\\n' : ''}\\\nResumen: ${summary}\\n\\\nDescripción: ${description}`\n    }\n  };\n});"
+      },
+      "id": "Function_ParseAlert",
+      "name": "Parse Alertmanager Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "fromEmail": "alertas@pixlmoney.local",
+        "toEmail": "devops@pixlmoney.local",
+        "subject": "={{ $json.subject }}",
+        "text": "={{ $json.emailBody }}"
+      },
+      "id": "Email_SendAlert",
+      "name": "Send Alert Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        750,
+        300
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "n8n-smtp-mailhog",
+          "name": "SMTP MailHog"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Alert Webhook Receiver": {
+      "main": [
+        [
+          {
+            "node": "Parse Alertmanager Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Alertmanager Data": {
+      "main": [
+        [
+          {
+            "node": "Send Alert Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "id": "PixelMoney_AlertNotifier_v1"
+}

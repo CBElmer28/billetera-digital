@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pymysql
+passlib[bcrypt]
+python-jose[cryptography]
+pydantic
+email-validator
+python-dotenv
+httpx
+prometheus-client
+python-multipart
+bcrypt==3.2.0

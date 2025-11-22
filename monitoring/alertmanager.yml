@@ -1,0 +1,47 @@
+# Archivo de configuración principal para Alertmanager.
+# Define cómo se agrupan, inhiben y enrutan las alertas recibidas de Prometheus.
+
+global:
+  # Tiempo que una alerta debe estar inactiva antes de considerarse resuelta.
+  resolve_timeout: 5m
+
+  # --- Configuración SMTP (para enviar correos a MailHog) ---
+  # Host y puerto del contenedor MailHog (nombre de servicio de Docker).
+  smtp_smarthost: 'mailhog:1025'
+  # Dirección 'De' que aparecerá en los correos de alerta.
+  smtp_from: 'alertmanager@pixlemoney.local' # Usando el nombre del proyecto
+  # MailHog no requiere TLS, así que se deshabilita.
+  smtp_require_tls: false
+  # No se necesita autenticación para MailHog (smtp_auth_username/password omitidos).
+
+# Define la ruta principal para las alertas entrantes.
+route:
+  # Receptor por defecto si ninguna sub-ruta coincide.
+  receiver: 'notificaciones-devops'
+
+  # Agrupa alertas con las mismas etiquetas (nombre de alerta y job)
+  # para evitar múltiples notificaciones de lo mismo.
+  group_by: ['alertname', 'job']
+
+  # Tiempo de espera inicial antes de enviar una notificación para un grupo nuevo.
+  # Permite que lleguen más instancias de la misma alerta antes de notificar.
+  group_wait: 30s
+
+  # Tiempo de espera antes de enviar notificaciones para nuevas alertas del MISMO grupo
+  # una vez que ya se ha enviado la primera notificación.
+  group_interval: 5m
+
+  # Si una alerta persiste, reenvía la notificación cada hora.
+  repeat_interval: 1h
+
+  
+
+# Define los receptores (a dónde se envían las notificaciones).
+receivers:
+  - name: 'notificaciones-devops' # Nombre del receptor definido en 'route'.
+    email_configs:
+      - to: 'devops@pixlemoney.local' # Dirección de correo destino (aparecerá en MailHog).
+        # Envía una notificación cuando una alerta que estaba activa se resuelve.
+        send_resolved: true
+        # Se podrían añadir más configuraciones como 'subject', 'html', etc.
+

@@ -1,0 +1,60 @@
+# Define las reglas de alerta que Prometheus evaluará periódicamente.
+
+groups:
+  - name: EstadoServiciosCriticos
+    rules:
+      # --- Regla: Servicio Caído ---
+    
+      - alert: ServicioCaido
+        expr: up == 0
+        for: 1m # Espera 1 minuto de caída continua antes de alertar
+        labels:
+          severity: critical # Nivel de severidad de la alerta
+        annotations:
+          summary: "Servicio caído: {{ $labels.instance }}"
+          description: "El servicio '{{ $labels.job }}' en la instancia {{ $labels.instance }} ha dejado de responder a Prometheus."
+
+      # --- Regla: Tasa Alta de Errores HTTP 5xx ---
+      # Se activa si la tasa de respuestas con código 5xx (errores de servidor)
+      # supera el 5% en los últimos 2 minutos.
+      # NOTA: Asume que el middleware exporta una métrica llamada 'http_requests_total'
+      # con etiquetas 'status_code', 'job', 'instance'.
+      - alert: TasaErrores5xxAlta
+        expr: (sum by (job, instance) (rate(http_requests_total{status_code=~"5.."}[2m]))) / (sum by (job, instance) (rate(http_requests_total[2m]))) > 0.05
+        for: 2m # Espera 2 minutos de tasa alta continua
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tasa alta de errores 5xx en {{ $labels.job }} ({{ $labels.instance }})"
+          description: "El servicio '{{ $labels.job }}' en {{ $labels.instance }} está devolviendo >5% de errores 5xx. Tasa actual: {{ $value | humanizePercentage }}." # humanizePercentage formatea como %
+
+      # --- Regla: Latencia Alta de Peticiones (Percentil 95) ---
+      # Se activa si el percentil 95 de la latencia de las peticiones HTTP
+      # en los últimos 5 minutos supera 1 segundo.
+      # NOTA: Asume que el middleware exporta una métrica Histogram llamada 'http_request_latency_seconds'.
+      - alert: LatenciaPeticionAltaP95
+        expr: histogram_quantile(0.95, sum by (le, job, instance) (rate(http_request_latency_seconds_bucket[5m]))) > 1.0
+        for: 5m # Espera 5 minutos de latencia alta continua
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latencia alta (P95 > 1s) en {{ $labels.job }} ({{ $labels.instance }})"
+          description: "El percentil 95 de la latencia para '{{ $labels.job }}' en {{ $labels.instance }} ha superado 1 segundo. Valor actual: {{ $value | printf \"%.2fs\" }}."
+
+  # --- Reglas Específicas de Negocio (Ejemplos) ---
+  - name: LogicaNegocioAlertas
+    rules:
+      # --- Regla: No se procesan depósitos ---
+      # Se activa si el contador de depósitos no ha aumentado en los últimos 10 minutos.
+      # Usa la métrica personalizada 'ledger_deposits_total'.
+      - alert: DepositosNoProcesados
+        # Filtramos por el job específico si es necesario, aunque el nombre de la métrica ya es único.
+        expr: increase(ledger_deposits_total{job="billetera_bank_a_services"}[10m]) == 0
+        for: 10m # Espera 10 minutos sin depósitos
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ledger Service no ha procesado depósitos recientemente"
+          description: "No se ha registrado ningún incremento en el contador 'ledger_deposits_total' en los últimos 10 minutos."
+
+      # Podrías añadir reglas similares para 'ledger_transfers_total' o 'ledger_contributions_total'.

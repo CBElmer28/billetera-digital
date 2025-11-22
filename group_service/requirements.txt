@@ -1,0 +1,11 @@
+# Dependencias de Python para el Group Service.
+
+fastapi
+uvicorn[standard]
+passlib[bcrypt]
+python-jose[cryptography]
+sqlalchemy
+pymysql
+python-dotenv
+prometheus-client
+httpx

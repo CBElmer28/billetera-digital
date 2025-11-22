@@ -1,0 +1,61 @@
+{
+  "name": "Recovery Notifier - Pixel Money",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "recovery",
+        "responseMode": "onReceived",
+        "responseData": "{\"status\":\"ok\"}"
+      },
+      "id": "Webhook_Recovery",
+      "name": "Recovery Webhook Receiver",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "pixelmoney-watchdog-recovery"
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "fromEmail": "watchdog@pixlmoney.local",
+        "toEmail": "devops@pixlmoney.local",
+        "subject": "[Watchdog] Servicio recuperado: {{$json.body.container}}",
+        "text": "El script Watchdog ha realizado una acción sobre un contenedor:\n\nContenedor: {{$json.body.container}}\nAcción: {{$json.body.action}}\nDetalle: {{$json.body.detail}}\nHora: {{$json.body.timestamp}}"
+      },
+      "id": "Email_Recovery",
+      "name": "Send Recovery Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        550,
+        300
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "n8n-smtp-mailhog",
+          "name": "SMTP MailHog"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Recovery Webhook Receiver": {
+      "main": [
+        [
+          {
+            "node": "Send Recovery Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "id": "PixelMoney_RecoveryNotifier_v1"
+}
