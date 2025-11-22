@@ -76,7 +76,7 @@ async def metrics_middleware(request: Request, call_next):
 
 # --- Dependencia para verificar API Key ---
 async def verify_api_key(x_api_key: str = Header(..., description="Clave API secreta del banco origen.")):
-    """Verifica que la cabecera X-API-KEY sea la esperada."""
+    """Verifica que la cabecera x-wallet-b2b-key sea la esperada."""
     if x_api_key != EXPECTED_API_KEY:
         logger.warning(f"Intento de acceso interbancario con API Key inválida: {x_api_key}")
         raise HTTPException(

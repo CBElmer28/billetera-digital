@@ -324,7 +324,7 @@ async def transfer(
                 "transaction_id": str(tx_id),
                 "description": "Transferencia desde Pixel Money"
             }
-            interbank_headers = {"X-API-KEY": INTERBANK_API_KEY}
+            interbank_headers = {"x-wallet-b2b-key": INTERBANK_API_KEY}
 
             response_bank_b = await client.post(
                 f"{INTERBANK_SERVICE_URL}/interbank/transfers",

@@ -80,7 +80,7 @@ PUBLIC_ROUTES = [
 
 
 # ... (cerca de PUBLIC_ROUTES) ...
-API_KEY_NAME = "X-API-Key"
+API_KEY_NAME = "x-wallet-b2b-key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False) # auto_error=False para manejo manual
 PARTNER_API_KEY = os.getenv("PARTNER_API_KEY")
 
