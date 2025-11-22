@@ -74,6 +74,7 @@ PUBLIC_ROUTES = [
     "/openapi.json",
     "/api/v1/inbound-transfer",
     "/bank/stats"  
+    "/p2p/check"  # <--- AGREGA ESTA LÍNEA
 ]
 
 
@@ -746,7 +747,6 @@ async def proxy_bank_stats(request: Request):
 async def check_recipient_name(
     phone_number: str, 
     request: Request, 
-    user_id: int = Depends(get_current_user_id)
 ):
     """Permite al frontend validar el nombre del destinatario antes de transferir."""
     # Reenvía la consulta al Auth Service
