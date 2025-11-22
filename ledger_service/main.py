@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from collections import defaultdict
+import asyncio
 from decimal import Decimal
 
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Request, Response
@@ -157,21 +158,30 @@ def check_idempotency(session: Session, key: str) -> Optional[uuid.UUID]:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al verificar idempotencia")
 
 async def get_transaction_by_id(session: Session, tx_id: uuid.UUID) -> Optional[dict]:
+    """
+    Obtiene una transacción de Cassandra por su ID, usando la ejecución asíncrona.
+    """
     try:
-        # Usa la consulta simple (síncrona)
         query = SimpleStatement(f"SELECT * FROM {KEYSPACE}.transactions WHERE id = %s")
-        # El resultado de .one() es la fila de Cassandra (si existe)
-        result = session.execute(query, (tx_id,)).one()
         
-        # result es un objeto Row de Cassandra que tiene _asdict()
+        # 1. Usar execute_async para obtener un Future
+        future = session.execute_async(query, (tx_id,))
+        
+        # 2. Esperar el resultado del Future de forma asíncrona
+        # Nota: asyncio.wrap_future convierte el Future de Cassandra a un awaitable de Python.
+        result_set = await asyncio.wrap_future(future)
+        
+        # 3. Obtener el primer resultado (fila de Cassandra)
+        result = result_set.one()
+        
         if result:
-            # Esta línea transforma el objeto Row en un dict
+            # result es la fila de Cassandra, usamos ._asdict()
             return result._asdict()
+            
         return None
         
     except Exception as e:
         logger.error(f"Error al obtener transacción {tx_id}: {e}", exc_info=True)
-        # Esto está bien, si hay un error de DB, devolvemos None
         return None
 
 # --- Endpoints de la API ---
