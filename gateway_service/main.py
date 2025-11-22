@@ -26,13 +26,15 @@ BALANCE_URL = os.getenv("BALANCE_SERVICE_URL")
 LEDGER_URL = os.getenv("LEDGER_SERVICE_URL")
 GROUP_URL = os.getenv("GROUP_SERVICE_URL")
 
-# Verifica que las URLs estén definidas
-required_urls = {"AUTH_URL", "BALANCE_URL", "LEDGER_URL", "GROUP_URL"}
-missing_urls = required_urls - set(os.environ)
+# --- CORRECCIÓN: Validar si se leyeron los valores correctamente ---
+missing_urls = []
+if not AUTH_URL: missing_urls.append("AUTH_SERVICE_URL")
+if not BALANCE_URL: missing_urls.append("BALANCE_SERVICE_URL")
+if not LEDGER_URL: missing_urls.append("LEDGER_SERVICE_URL")
+if not GROUP_URL: missing_urls.append("GROUP_SERVICE_URL")
+
 if missing_urls:
     logger.critical(f"Faltan URLs de servicios internos en .env: {', '.join(missing_urls)}")
-    # El gateway no puede funcionar sin estas URLs.
-    # Lanzamos una excepción para detener el arranque.
     raise EnvironmentError(f"Faltan URLs de servicios internos: {', '.join(missing_urls)}")
 
 # Inicializa FastAPI
