@@ -158,11 +158,20 @@ def check_idempotency(session: Session, key: str) -> Optional[uuid.UUID]:
 
 async def get_transaction_by_id(session: Session, tx_id: uuid.UUID) -> Optional[dict]:
     try:
+        # Usa la consulta simple (síncrona)
         query = SimpleStatement(f"SELECT * FROM {KEYSPACE}.transactions WHERE id = %s")
+        # El resultado de .one() es la fila de Cassandra (si existe)
         result = session.execute(query, (tx_id,)).one()
-        return result._asdict() if result else None
+        
+        # result es un objeto Row de Cassandra que tiene _asdict()
+        if result:
+            # Esta línea transforma el objeto Row en un dict
+            return result._asdict()
+        return None
+        
     except Exception as e:
         logger.error(f"Error al obtener transacción {tx_id}: {e}", exc_info=True)
+        # Esto está bien, si hay un error de DB, devolvemos None
         return None
 
 # --- Endpoints de la API ---
