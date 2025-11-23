@@ -164,21 +164,12 @@ async def get_transaction_by_id(session: Session, tx_id: uuid.UUID) -> Optional[
         if not result:
             return None
             
-        # --- CORRECCIÓN AQUÍ ---
-        # Si 'result' ya es un diccionario, lo devolvemos directo.
-        if isinstance(result, dict):
-            return result
-        # Si es un objeto Row (NamedTuple), usamos _asdict().
-        if hasattr(result, '_asdict'):
-            return result._asdict()
-            
-        # Fallback: intentar convertirlo a dict si es otro tipo
-        return dict(result)
+        # --- CORRECCIÓN: Validar si ya es dict ---
+        return result if isinstance(result, dict) else result._asdict()
         
     except Exception as e:
         logger.error(f"Error al obtener transacción {tx_id}: {e}", exc_info=True)
         return None
-
 # --- Endpoints de la API ---
 
 @app.post("/deposit", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Transactions"])
@@ -552,7 +543,11 @@ async def get_my_transactions(
     """)
     try:
         result_set = db.execute(query, (x_user_id,))
-        transactions = [schemas.Transaction(**row._asdict()) for row in result_set]
+        # --- CORRECCIÓN: Normalizar cada fila a diccionario ---
+        transactions = []
+        for row in result_set:
+            row_data = row if isinstance(row, dict) else row._asdict()
+            transactions.append(schemas.Transaction(**row_data))
         return transactions
     except Exception as e:
         logger.error(f"Error al obtener transacciones para user_id {x_user_id}: {e}", exc_info=True)
@@ -574,7 +569,11 @@ async def get_group_transactions(
     """)
     try:
         result_set = db.execute(query, (group_id,))
-        transactions = [schemas.Transaction(**row._asdict()) for row in result_set]
+        # --- CORRECCIÓN: Normalizar cada fila a diccionario ---
+        transactions = []
+        for row in result_set:
+            row_data = row if isinstance(row, dict) else row._asdict()
+            transactions.append(schemas.Transaction(**row_data))
         return transactions
     except Exception as e:
         logger.error(f"Error al obtener transacciones para group_id {group_id}: {e}", exc_info=True)
@@ -600,20 +599,26 @@ async def get_daily_balance(
     try:
         result_set = db.execute(query, (user_id, thirty_days_ago))
 
-        daily_balance = defaultdict(Decimal) # Usar Decimal
+        daily_balance = defaultdict(Decimal)
         running_balance = Decimal('0.0') 
 
         for row in result_set:
-            tx_date = row.created_at.date()
-            if row.type in ["DEPOSIT", "P2P_RECEIVED", "CONTRIBUTION_RECEIVED", "GROUP_WITHDRAWAL"]: # ¡Añadido GROUP_WITHDRAWAL!
-                running_balance += row.amount
-            elif row.type in ["P2P_SENT", "CONTRIBUTION_SENT", "TRANSFER"]:
-                running_balance -= row.amount
+            # --- CORRECCIÓN: Convertir a dict y usar corchetes ---
+            r = row if isinstance(row, dict) else row._asdict()
+            
+            tx_date = r['created_at'].date() # Antes: row.created_at.date()
+            tx_type = r['type']
+            tx_amount = r['amount']
+
+            if tx_type in ["DEPOSIT", "P2P_RECEIVED", "CONTRIBUTION_RECEIVED", "GROUP_WITHDRAWAL"]:
+                running_balance += tx_amount
+            elif tx_type in ["P2P_SENT", "CONTRIBUTION_SENT", "TRANSFER"]:
+                running_balance -= tx_amount
             daily_balance[tx_date] = running_balance
 
         data = []
         balance = Decimal('0.0')
-        for i in range(30, -1, -1): # 30 días atrás hasta hoy
+        for i in range(30, -1, -1):
             day = (now - timedelta(days=i)).date()
             if day in daily_balance:
                 balance = daily_balance[day]
