@@ -21,19 +21,27 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # --- URLs de Servicios Internos ---
+# 1. Obtenemos los valores
 AUTH_URL = os.getenv("AUTH_SERVICE_URL")
 BALANCE_URL = os.getenv("BALANCE_SERVICE_URL")
 LEDGER_URL = os.getenv("LEDGER_SERVICE_URL")
 GROUP_URL = os.getenv("GROUP_SERVICE_URL")
 
-# Verifica que las URLs estén definidas
-required_urls = {"AUTH_URL", "BALANCE_URL", "LEDGER_URL", "GROUP_URL"}
-missing_urls = required_urls - set(os.environ)
+# 2. Creamos un diccionario para validar
+env_vars = {
+    "AUTH_SERVICE_URL": AUTH_URL,
+    "BALANCE_SERVICE_URL": BALANCE_URL,
+    "LEDGER_SERVICE_URL": LEDGER_URL,
+    "GROUP_SERVICE_URL": GROUP_URL
+}
+
+# 3. Filtramos cuáles tienen valor None o vacío
+missing_urls = [key for key, value in env_vars.items() if not value]
+
 if missing_urls:
-    logger.critical(f"Faltan URLs de servicios internos en .env: {', '.join(missing_urls)}")
-    # El gateway no puede funcionar sin estas URLs.
-    # Lanzamos una excepción para detener el arranque.
-    raise EnvironmentError(f"Faltan URLs de servicios internos: {', '.join(missing_urls)}")
+    error_msg = f"Faltan variables de entorno críticas: {', '.join(missing_urls)}"
+    logger.critical(error_msg)
+    raise EnvironmentError(error_msg)
 
 # Inicializa FastAPI
 app = FastAPI(
