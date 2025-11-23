@@ -8,7 +8,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from collections import defaultdict
-import asyncio
 from decimal import Decimal
 
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Request, Response
@@ -158,28 +157,10 @@ def check_idempotency(session: Session, key: str) -> Optional[uuid.UUID]:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al verificar idempotencia")
 
 async def get_transaction_by_id(session: Session, tx_id: uuid.UUID) -> Optional[dict]:
-    """
-    Obtiene una transacción de Cassandra por su ID, usando la ejecución asíncrona.
-    """
     try:
         query = SimpleStatement(f"SELECT * FROM {KEYSPACE}.transactions WHERE id = %s")
-        
-        # 1. Usar execute_async para obtener un Future
-        future = session.execute_async(query, (tx_id,))
-        
-        # 2. Esperar el resultado del Future de forma asíncrona
-        # Nota: asyncio.wrap_future convierte el Future de Cassandra a un awaitable de Python.
-        result_set = await asyncio.wrap_future(future)
-        
-        # 3. Obtener el primer resultado (fila de Cassandra)
-        result = result_set.one()
-        
-        if result:
-            # result es la fila de Cassandra, usamos ._asdict()
-            return result._asdict()
-            
-        return None
-        
+        result = session.execute(query, (tx_id,)).one()
+        return result._asdict() if result else None
     except Exception as e:
         logger.error(f"Error al obtener transacción {tx_id}: {e}", exc_info=True)
         return None
@@ -343,7 +324,7 @@ async def transfer(
                 "transaction_id": str(tx_id),
                 "description": "Transferencia desde Pixel Money"
             }
-            interbank_headers = {"x-wallet-b2b-key": INTERBANK_API_KEY}
+            interbank_headers = {"X-API-KEY": INTERBANK_API_KEY}
 
             response_bank_b = await client.post(
                 f"{INTERBANK_SERVICE_URL}/interbank/transfers",

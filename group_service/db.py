@@ -43,8 +43,8 @@ while attempts < max_attempts and engine is None:
     try:
         attempts += 1
         logger.info(f"Intentando conectar a MariaDB (Intento {attempts}/{max_attempts})...")
-        
-        # CORRECCIÓN PARA TIDB CLOUD: Añadimos configuración SSL
+
+        # CORRECCIÓN PARA TIDB CLOUD: Configuración SSL
         engine = create_engine(
             SQLALCHEMY_DATABASE_URL, 
             pool_pre_ping=True,

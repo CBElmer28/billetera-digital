@@ -5,17 +5,14 @@ from cassandra.cluster import Cluster, Session
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.query import dict_factory
 
-# Configura logger
+# --- CONFIGURACIÓN DE LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Variables de Entorno
+# --- VARIABLES DE ENTORNO ---
 KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "ledger")
 
-# --- CORRECCIÓN AQUÍ ---
-# 1. Buscamos la variable singular del .env
-# 2. Si no existe, buscamos la plural
-# 3. Si ninguna existe, usamos "localhost" (mejor para pruebas locales que "cassandra")
+# Lógica robusta para detectar hosts (Local/Docker)
 _host_env = os.getenv("CASSANDRA_HOST") or os.getenv("CASSANDRA_HOSTS") or "localhost"
 CASSANDRA_HOSTS = _host_env.split(',')
 
@@ -23,7 +20,7 @@ CASSANDRA_PORT = int(os.getenv("CASSANDRA_PORT", 9042))
 CASSANDRA_USER = os.getenv("CASSANDRA_USER")
 CASSANDRA_PASS = os.getenv("CASSANDRA_PASS")
 
-# Variables para Astra DB
+# Variables específicas para Astra DB (Nube)
 ASTRA_DB_TOKEN = os.getenv("ASTRA_DB_TOKEN")
 ASTRA_DB_SECURE_BUNDLE_PATH = os.getenv("ASTRA_DB_SECURE_BUNDLE_PATH", "secure-connect-bundle.zip")
 
@@ -33,8 +30,10 @@ session = None
 
 def get_cassandra_session() -> Session:
     """
-    Establece y devuelve una conexión (sesión) con Cassandra (Local o Astra).
-    Nombre corregido para compatibilidad con main.py.
+    Establece y devuelve una conexión (sesión) con Cassandra.
+    Soporta modo Híbrido:
+    1. Astra DB (Cloud) si ASTRA_DB_TOKEN existe.
+    2. Cassandra Local (Docker) si no.
     """
     global cluster, session
     
@@ -76,22 +75,23 @@ def get_cassandra_session() -> Session:
 
             session = cluster.connect()
             
-            # Configuración de la sesión
+            # Configuración de la sesión para devolver diccionarios (Crucial para FastAPI)
             session.row_factory = dict_factory 
             
-            # Si es Local, intentamos crear el Keyspace (Astra no lo permite/necesita aquí)
+            # Creación de Keyspace (Solo necesario en Local, Astra ya lo trae creado usualmente)
             if not ASTRA_DB_TOKEN:
                 try:
+                    logger.info(f"Verificando keyspace '{KEYSPACE}'...")
                     session.execute(f"""
                         CREATE KEYSPACE IF NOT EXISTS {KEYSPACE}
                         WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': '1'}}
                     """)
                 except Exception as e:
-                    logger.warning(f"No se pudo crear keyspace (normal si es Astra): {e}")
+                    logger.warning(f"No se pudo crear keyspace (puede ser error de permisos o ya existe): {e}")
 
             session.set_keyspace(KEYSPACE)
             
-            # Creamos las tablas aquí mismo para asegurar que existen antes de devolver la sesión
+            # Verificamos/Creamos el esquema de tablas
             create_keyspace_and_tables(session)
             
             logger.info("Conexión a Cassandra establecida y schema verificado.")
@@ -105,10 +105,10 @@ def get_cassandra_session() -> Session:
 
 def create_keyspace_and_tables(session: Session):
     """
-    Crea las tablas necesarias si no existen.
-    Renombrado para compatibilidad con main.py.
+    Crea las tablas e índices necesarios si no existen.
+    Combina la estructura del script de despliegue con las correcciones del segundo script.
     """
-    logger.info("Verificando tablas...")
+    logger.info("Verificando tablas e índices...")
 
     # 1. Tabla Principal (Query por ID)
     session.execute(f"""
@@ -130,7 +130,7 @@ def create_keyspace_and_tables(session: Session):
         )
     """)
 
-    # 2. Idempotencia
+    # 2. Idempotencia (Evitar duplicados)
     session.execute(f"""
         CREATE TABLE IF NOT EXISTS {KEYSPACE}.idempotency_keys (
             key UUID PRIMARY KEY,
@@ -138,7 +138,7 @@ def create_keyspace_and_tables(session: Session):
         )
     """)
 
-    # 3. Historial por Usuario (Query por User + Fecha)
+    # 3. Historial por Usuario (Query por User + Fecha Descendente)
     session.execute(f"""
         CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions_by_user (
             user_id INT,
@@ -159,7 +159,7 @@ def create_keyspace_and_tables(session: Session):
         ) WITH CLUSTERING ORDER BY (created_at DESC, id ASC)
     """)
 
-    # 4. Historial por Grupo (Query por Group + Fecha)
+    # 4. Historial por Grupo (Query por Group + Fecha Descendente)
     session.execute(f"""
         CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions_by_group (
             group_id INT,
@@ -180,7 +180,16 @@ def create_keyspace_and_tables(session: Session):
         ) WITH CLUSTERING ORDER BY (created_at DESC, id ASC)
     """)
     
-    logger.info("Tablas verificadas correctamente.")
+    # 5. Índices Secundarios (Mejora del script 2)
+    # Permite buscar en la tabla principal por user_id si es necesario hacer debug o si falla la tabla pivot
+    try:
+        session.execute(f"""
+            CREATE INDEX IF NOT EXISTS ON {KEYSPACE}.transactions (user_id);
+        """)
+    except Exception as e:
+        logger.warning(f"No se pudo crear índice secundario (puede no ser soportado en algunas config de Astra): {e}")
+    
+    logger.info("Tablas e índices verificados correctamente.")
 
 # Función para inyección de dependencias (FastAPI)
 def get_db():
