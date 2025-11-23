@@ -59,7 +59,7 @@ origins = [
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
     "https://fronbilletera-digital-production.up.railway.app",
-    "front-billetera-digital.vercel.app"
+    "https://front-billetera-digital.vercel.app"
 ]
 
 app.add_middleware(
