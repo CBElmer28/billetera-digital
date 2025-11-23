@@ -160,7 +160,21 @@ async def get_transaction_by_id(session: Session, tx_id: uuid.UUID) -> Optional[
     try:
         query = SimpleStatement(f"SELECT * FROM {KEYSPACE}.transactions WHERE id = %s")
         result = session.execute(query, (tx_id,)).one()
-        return result._asdict() if result else None
+        
+        if not result:
+            return None
+            
+        # --- CORRECCIÓN AQUÍ ---
+        # Si 'result' ya es un diccionario, lo devolvemos directo.
+        if isinstance(result, dict):
+            return result
+        # Si es un objeto Row (NamedTuple), usamos _asdict().
+        if hasattr(result, '_asdict'):
+            return result._asdict()
+            
+        # Fallback: intentar convertirlo a dict si es otro tipo
+        return dict(result)
+        
     except Exception as e:
         logger.error(f"Error al obtener transacción {tx_id}: {e}", exc_info=True)
         return None
