@@ -26,13 +26,15 @@ AUTH_URL = os.getenv("AUTH_SERVICE_URL")
 BALANCE_URL = os.getenv("BALANCE_SERVICE_URL")
 LEDGER_URL = os.getenv("LEDGER_SERVICE_URL")
 GROUP_URL = os.getenv("GROUP_SERVICE_URL")
+CENTRAL_WALLET_TOKEN = os.getenv("CENTRAL_WALLET_TOKEN")
 
 # 2. Creamos un diccionario para validar
 env_vars = {
     "AUTH_SERVICE_URL": AUTH_URL,
     "BALANCE_SERVICE_URL": BALANCE_URL,
     "LEDGER_SERVICE_URL": LEDGER_URL,
-    "GROUP_SERVICE_URL": GROUP_URL
+    "GROUP_SERVICE_URL": GROUP_URL,
+    "CENTRAL_WALLET_TOKEN": CENTRAL_WALLET_TOKEN
 }
 
 # 3. Filtramos cuáles tienen valor None o vacío
@@ -78,7 +80,7 @@ PUBLIC_ROUTES = [
     "/metrics",
     "/docs",
     "/openapi.json",
-    "/api/v1/inbound-transfer",
+    "/api/v1/central/deposit",
     "/bank/stats"  
 ]
 
@@ -706,22 +708,44 @@ async def proxy_leader_withdrawal(
     )
 
 
-@app.post("/api/v1/inbound-transfer", tags=["Partner API"])
-async def partner_inbound_transfer(
-    request: Request,
-    api_key: str = Depends(get_api_key) # ¡Seguridad!
-):
+@app.post("/api/v1/central/deposit", tags=["Central Webhook"])
+async def receive_central_deposit(request: Request):
     """
-    Punto de entrada público para que partners (ej. Otro Grupo) 
-    depositen dinero a un usuario de Pixel Money via número de celular.
+    Webhook oficial para la API Centralizada.
+    Recibe notificaciones de depósito, valida el token y reenvía al Ledger.
     """
-    logger.info(f"Recibida llamada de Partner API a /api/v1/inbound-transfer")
+    logger.info("Recibida llamada al Webhook Central /api/v1/central/deposit")
 
+    # 1. Validación de Seguridad Manual
+    # La API Central envía el token en 'X-API-Token'. 
+    # NOTA: Algunos frameworks normalizan a minúsculas, así que buscamos ambas formas.
+    token_header = request.headers.get("x-wallet-token") or request.headers.get("x-api-token")
+    
+    # (Opcional) Log para depuración inicial si tienes problemas
+    # logger.info(f"Headers recibidos: {request.headers}")
+
+    if token_header != CENTRAL_WALLET_TOKEN:
+        logger.warning(f"Intento de acceso no autorizado al webhook central. Token: {token_header}")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token de webhook inválido")
+
+    # 2. Reenviar al Ledger (Endpoint especial que creamos en el paso anterior)
+    # No inyectamos user_id porque la Central no sabe de usuarios logueados, 
+    # sabe de 'internalWalletId' que viene en el JSON.
     return await forward_request(
         request, 
-        f"{LEDGER_URL}/transfers/inbound",
+        f"{LEDGER_URL}/transfers/inbound-central",
         inject_user_id=False,
-        pass_headers=[] # No pasamos ningún header del partner
+        pass_headers=[] # No hace falta pasar headers, ya validamos aquí
+    )
+
+@app.post("/ledger/transfer-central", tags=["Ledger"])
+async def proxy_transfer_central(request: Request, user_id: int = Depends(get_current_user_id)):
+    return await forward_request(
+        request, 
+        f"{LEDGER_URL}/transfers/outbound-central", 
+        inject_user_id=True, 
+        # ¡ESTO ES VITAL! Pasar el token del usuario al Ledger
+        pass_headers=["Idempotency-Key", "Authorization"] 
     )
 
 # Agrega esto al final de gateway_service/main.py

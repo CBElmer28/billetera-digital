@@ -90,6 +90,58 @@ def decode_token(token: str) -> Optional[Dict]:
         logger.error(f"Error inesperado durante decodificación de token: {e}", exc_info=True)
         return None
 
+# --- CONFIGURACIÓN API CENTRALIZADA ---
+CENTRAL_API_URL = os.getenv("CENTRAL_API_URL")
+CENTRAL_WALLET_TOKEN = os.getenv("CENTRAL_WALLET_TOKEN")
+APP_NAME = os.getenv("APP_NAME", "PIXEL MONEY") # Valor por defecto si no está en .env
+
+logger = logging.getLogger(__name__)
+
+async def register_user_in_central(user_id: int, phone_number: str, user_name: str, auth_token: str) -> str | None:
+    """
+    Registra al usuario en la API Centralizada.
+    Retorna el wallet_uuid si es exitoso, o None si falla.
+    """
+    if not CENTRAL_API_URL or not CENTRAL_WALLET_TOKEN:
+        logger.warning("Configuración de API Central incompleta. Saltando registro central.")
+        return None
+
+    url = f"{CENTRAL_API_URL}/register-wallet"
+    
+    payload = {
+        "userIdentifier": phone_number,
+        "internalWalletId": str(user_id),
+        "userName": user_name,
+        "appName": APP_NAME
+    }
+    
+    headers = {
+        "x-wallet-token": CENTRAL_WALLET_TOKEN,
+        "Authorization": f"Bearer {auth_token}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            logger.info(f"Registrando en API Central: {payload}")
+            response = await client.post(url, json=payload, headers=headers)
+            
+            if response.status_code in [200, 201]:
+                data = response.json()
+                # La estructura de respuesta puede variar (data o directo)
+                wallet_data = data.get("data", data) 
+                wallet_uuid = wallet_data.get("wallet_uuid")
+                
+                logger.info(f"Registro Central exitoso. UUID: {wallet_uuid}")
+                return wallet_uuid
+            else:
+                logger.error(f"Fallo registro Central ({response.status_code}): {response.text}")
+                return None
+
+    except Exception as e:
+        logger.error(f"Error de conexión con API Central: {e}")
+        return None
+
 # --- Service Discovery ---
 # URL interna para el Balance Service
 BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")

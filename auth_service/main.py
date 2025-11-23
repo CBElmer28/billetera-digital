@@ -1,5 +1,6 @@
 import logging
 import time
+import os
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
@@ -7,6 +8,7 @@ from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from sqlalchemy.orm import Session
 from typing import Optional, List
+
 
 # Importaciones locales
 from db import engine, Base, get_db
@@ -20,6 +22,10 @@ from utils import (
     create_access_token,
     decode_token,
     BALANCE_SERVICE_URL,
+    CENTRAL_API_URL,
+    CENTRAL_WALLET_TOKEN,
+    APP_NAME,
+    register_user_in_central
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
@@ -143,7 +149,6 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
         logger.error(f"Database error during user creation for email {user.email}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not save user.")
 
-    
     async with httpx.AsyncClient() as client:
         try:
             create_account_url = f"{BALANCE_SERVICE_URL}/accounts"
@@ -173,12 +178,31 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
                      detail = f"Balance Service error: Status {status_code}"
             raise HTTPException(status_code=status_code, detail=detail)
 
-    return {
-        "id": new_user.id,
-        "name": new_user.name,
-        "email": new_user.email,
-        "phone_number": new_user.phone_number
-    }
+    # 4. Llamar a API Central (SAGA Paso 2 - Doble Registro)
+    # Generamos un token temporal válido para la Central (con la SECRET_KEY compartida)
+    temp_token_for_central = create_access_token(data={"sub": str(new_user.id), "name": new_user.name})
+    
+    # Usamos la función de utilidad que encapsula la complejidad
+    wallet_uuid = await register_user_in_central(
+        user_id=new_user.id,
+        phone_number=new_user.phone_number,
+        user_name=new_user.name,
+        auth_token=temp_token_for_central
+    )
+
+    # Si la Central nos devuelve un ID, lo guardamos
+    if wallet_uuid:
+        new_user.central_wallet_id = wallet_uuid
+        try:
+            db.commit() # Actualizamos el usuario con el ID de la central
+            logger.info(f"User {new_user.id} linked to Central Wallet {wallet_uuid}")
+        except Exception as e:
+            logger.error(f"Error saving central_wallet_id: {e}")
+            # No fallamos el registro completo si esto falla, ya que el usuario es funcional localmente
+
+    return new_user
+
+    
 
 
 @app.post("/login", response_model=schemas.Token, tags=["Authentication"])

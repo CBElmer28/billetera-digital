@@ -18,9 +18,15 @@ class UserResponse(BaseModel):
     name: str
     email: EmailStr # <-- CORREGIDO (era 'str')
     phone_number: str | None = None
+    
+    # Campo del centrall_wallet_id agregado para respuesta
+    central_wallet_id: Optional[str] = None # Nuevo campo
 
     # Configuración de Pydantic v2+ para permitir mapeo desde modelos ORM (SQLAlchemy)
     model_config = ConfigDict(from_attributes=True)
+
+    class Config:
+        orm_mode = True
 
 
 # --- Schemas de Token ---
