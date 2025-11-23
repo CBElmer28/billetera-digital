@@ -1,167 +1,200 @@
-# ledger_service/cassandra_db.py (Versión Limpia y Corregida)
-
 import os
 import logging
 import time
 from cassandra.cluster import Cluster, Session
 from cassandra.auth import PlainTextAuthProvider
-from cassandra.policies import DCAwareRoundRobinPolicy
-from cassandra.query import SimpleStatement
+from cassandra.query import dict_factory
 
-# Configura logger
+# --- CONFIGURACIÓN DE LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Lee la configuración de Cassandra desde las variables de entorno
-CASSANDRA_HOSTS = os.getenv("CASSANDRA_HOSTS", "cassandra1").split(',')
+# --- VARIABLES DE ENTORNO ---
+KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "ledger")
+
+# Lógica robusta para detectar hosts (Local/Docker)
+_host_env = os.getenv("CASSANDRA_HOST") or os.getenv("CASSANDRA_HOSTS") or "localhost"
+CASSANDRA_HOSTS = _host_env.split(',')
+
 CASSANDRA_PORT = int(os.getenv("CASSANDRA_PORT", 9042))
 CASSANDRA_USER = os.getenv("CASSANDRA_USER")
 CASSANDRA_PASS = os.getenv("CASSANDRA_PASS")
-CASSANDRA_DATACENTER = os.getenv("CASSANDRA_DATACENTER", "dc1")
-KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "wallet_ledger")
+
+# Variables específicas para Astra DB (Nube)
+ASTRA_DB_TOKEN = os.getenv("ASTRA_DB_TOKEN")
+ASTRA_DB_SECURE_BUNDLE_PATH = os.getenv("ASTRA_DB_SECURE_BUNDLE_PATH", "secure-connect-bundle.zip")
+
+# Singleton de la sesión
+cluster = None
+session = None
 
 def get_cassandra_session() -> Session:
     """
-    Establece y devuelve una conexión (sesión) con el cluster de Cassandra.
-    Reintenta la conexión varias veces antes de fallar.
+    Establece y devuelve una conexión (sesión) con Cassandra.
+    Soporta modo Híbrido:
+    1. Astra DB (Cloud) si ASTRA_DB_TOKEN existe.
+    2. Cassandra Local (Docker) si no.
     """
-    auth_provider = None
-    if CASSANDRA_USER and CASSANDRA_PASS:
-        auth_provider = PlainTextAuthProvider(username=CASSANDRA_USER, password=CASSANDRA_PASS)
+    global cluster, session
+    
+    if session:
+        return session
 
-    cluster = Cluster(
-        contact_points=CASSANDRA_HOSTS,
-        port=CASSANDRA_PORT,
-        auth_provider=auth_provider,
-        protocol_version=4
-    )
-
-    session = None
     attempts = 0
     max_attempts = 30
-    retry_delay = 5 # segundos
+    retry_delay = 5
 
     while attempts < max_attempts:
         attempts += 1
         try:
             logger.info(f"Intentando conectar a Cassandra (Intento {attempts}/{max_attempts})...")
+            
+            # --- MODO 1: ASTRA DB (Nube) ---
+            if ASTRA_DB_TOKEN and os.path.exists(ASTRA_DB_SECURE_BUNDLE_PATH):
+                logger.info("Detectada configuración ASTRA DB. Conectando a la nube...")
+                cloud_config = {
+                    'secure_connect_bundle': ASTRA_DB_SECURE_BUNDLE_PATH
+                }
+                # En Astra, el 'username' siempre es 'token' y el password es tu token real
+                auth_provider = PlainTextAuthProvider('token', ASTRA_DB_TOKEN)
+                cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider)
+            
+            # --- MODO 2: CASSANDRA LOCAL (Docker) ---
+            else:
+                logger.info(f"Conectando a Cassandra Local en {CASSANDRA_HOSTS}:{CASSANDRA_PORT}...")
+                auth_provider = None
+                if CASSANDRA_USER and CASSANDRA_PASS:
+                    auth_provider = PlainTextAuthProvider(username=CASSANDRA_USER, password=CASSANDRA_PASS)
+                
+                cluster = Cluster(
+                    contact_points=CASSANDRA_HOSTS,
+                    port=CASSANDRA_PORT,
+                    auth_provider=auth_provider,
+                    protocol_version=4
+                )
+
             session = cluster.connect()
-            logger.info("Conexión a Cassandra establecida exitosamente.")
+            
+            # Configuración de la sesión para devolver diccionarios (Crucial para FastAPI)
+            session.row_factory = dict_factory 
+            
+            # Creación de Keyspace (Solo necesario en Local, Astra ya lo trae creado usualmente)
+            if not ASTRA_DB_TOKEN:
+                try:
+                    logger.info(f"Verificando keyspace '{KEYSPACE}'...")
+                    session.execute(f"""
+                        CREATE KEYSPACE IF NOT EXISTS {KEYSPACE}
+                        WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': '1'}}
+                    """)
+                except Exception as e:
+                    logger.warning(f"No se pudo crear keyspace (puede ser error de permisos o ya existe): {e}")
+
+            session.set_keyspace(KEYSPACE)
+            
+            # Verificamos/Creamos el esquema de tablas
+            create_keyspace_and_tables(session)
+            
+            logger.info("Conexión a Cassandra establecida y schema verificado.")
             return session
+
         except Exception as e:
             logger.warning(f"Fallo al conectar a Cassandra: {e}. Reintentando en {retry_delay}s...")
             time.sleep(retry_delay)
 
-    logger.error(f"Error fatal: No se pudo conectar a Cassandra después de {max_attempts} intentos.")
-    return None
+    raise Exception(f"Error fatal: No se pudo conectar a Cassandra después de {max_attempts} intentos.")
 
 def create_keyspace_and_tables(session: Session):
     """
-    Crea el Keyspace y las tablas necesarias si no existen.
-    Esta función debe ser idempotente.
+    Crea las tablas e índices necesarios si no existen.
+    Combina la estructura del script de despliegue con las correcciones del segundo script.
     """
-    if not session:
-        logger.error("No hay sesión de Cassandra para crear el schema.")
-        return
+    logger.info("Verificando tablas e índices...")
 
-    try:
-        # --- 1. Crear Keyspace ---
-        logger.info(f"Verificando/Creando keyspace '{KEYSPACE}'...")
-        session.execute(f"""
-        CREATE KEYSPACE IF NOT EXISTS {KEYSPACE}
-        WITH REPLICATION = {{
-            'class' : 'SimpleStrategy',
-            'replication_factor' : 1
-        }}
-        """)
-
-        # Seleccionar el keyspace para las siguientes operaciones
-        session.set_keyspace(KEYSPACE)
-
-        # --- 2. Crear Tabla 'transactions' (Búsqueda por ID) ---
-        logger.info("Verificando/Creando tabla 'transactions'...")
-        session.execute(f"""
+    # 1. Tabla Principal (Query por ID)
+    session.execute(f"""
         CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions (
-            id uuid PRIMARY KEY,
-            user_id int,
-            group_id int,
-            source_wallet_type text,
-            source_wallet_id text,
-            destination_wallet_type text,
-            destination_wallet_id text,
-            type text,
-            amount decimal,
-            currency text,
-            status text,
-            metadata text,
-            created_at timestamp,
-            updated_at timestamp
-        );
-        """)
+            id UUID PRIMARY KEY,
+            user_id INT,
+            group_id INT,
+            source_wallet_type TEXT,
+            source_wallet_id TEXT,
+            destination_wallet_type TEXT,
+            destination_wallet_id TEXT,
+            type TEXT,
+            amount DECIMAL,
+            currency TEXT,
+            status TEXT,
+            metadata TEXT,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP
+        )
+    """)
 
-        # --- 3. Crear Tabla 'idempotency_keys' (Evitar duplicados) ---
-        logger.info("Verificando/Creando tabla 'idempotency_keys'...")
-        session.execute(f"""
+    # 2. Idempotencia (Evitar duplicados)
+    session.execute(f"""
         CREATE TABLE IF NOT EXISTS {KEYSPACE}.idempotency_keys (
-            key uuid PRIMARY KEY,
-            transaction_id uuid
-        );
-        """)
+            key UUID PRIMARY KEY,
+            transaction_id UUID
+        )
+    """)
 
-        # --- 4. Crear Tabla 'transactions_by_user' (Historial de Usuario) ---
-        logger.info("Verificando/Creando tabla 'transactions_by_user'...")
-        session.execute(f"""
+    # 3. Historial por Usuario (Query por User + Fecha Descendente)
+    session.execute(f"""
         CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions_by_user (
-            user_id int,
-            created_at timestamp,
-            id uuid,
-            group_id int,
-            source_wallet_type text,
-            source_wallet_id text,
-            destination_wallet_type text,
-            destination_wallet_id text,
-            type text,
-            amount decimal,
-            currency text,
-            status text,
-            metadata text,
-            updated_at timestamp,
-            PRIMARY KEY (user_id, created_at, id)
-        ) WITH CLUSTERING ORDER BY (created_at DESC);
-        """)
+            user_id INT,
+            created_at TIMESTAMP,
+            id UUID,
+            group_id INT,
+            source_wallet_type TEXT,
+            source_wallet_id TEXT,
+            destination_wallet_type TEXT,
+            destination_wallet_id TEXT,
+            type TEXT,
+            amount DECIMAL,
+            currency TEXT,
+            status TEXT,
+            metadata TEXT,
+            updated_at TIMESTAMP,
+            PRIMARY KEY ((user_id), created_at, id)
+        ) WITH CLUSTERING ORDER BY (created_at DESC, id ASC)
+    """)
 
-        # --- 5. Crear Tabla 'transactions_by_group' (Historial de Grupo) ---
-        # ¡ESTA ES LA TABLA QUE FALLABA!
-        logger.info("Verificando/Creando tabla 'transactions_by_group'...")
-        session.execute(f"""
+    # 4. Historial por Grupo (Query por Group + Fecha Descendente)
+    session.execute(f"""
         CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions_by_group (
-            group_id int,
-            created_at timestamp,
-            id uuid,
-            user_id int,
-            source_wallet_type text,
-            source_wallet_id text,
-            destination_wallet_type text,
-            destination_wallet_id text,
-            type text,
-            amount decimal,
-            currency text,
-            status text,
-            metadata text,
-            updated_at timestamp,
-            PRIMARY KEY (group_id, created_at, id)
-        ) WITH CLUSTERING ORDER BY (created_at DESC);
-        """)
-
-        # --- 6. Crear Índices (Si son necesarios) ---
-        # (El índice en 'transactions' (user_id) no es ideal, pero lo dejamos por si acaso)
-        logger.info("Verificando/Creando índices...")
+            group_id INT,
+            created_at TIMESTAMP,
+            id UUID,
+            user_id INT,
+            source_wallet_type TEXT,
+            source_wallet_id TEXT,
+            destination_wallet_type TEXT,
+            destination_wallet_id TEXT,
+            type TEXT,
+            amount DECIMAL,
+            currency TEXT,
+            status TEXT,
+            metadata TEXT,
+            updated_at TIMESTAMP,
+            PRIMARY KEY ((group_id), created_at, id)
+        ) WITH CLUSTERING ORDER BY (created_at DESC, id ASC)
+    """)
+    
+    # 5. Índices Secundarios (Mejora del script 2)
+    # Permite buscar en la tabla principal por user_id si es necesario hacer debug o si falla la tabla pivot
+    try:
         session.execute(f"""
-        CREATE INDEX IF NOT EXISTS ON {KEYSPACE}.transactions (user_id);
+            CREATE INDEX IF NOT EXISTS ON {KEYSPACE}.transactions (user_id);
         """)
-
-        logger.info("Schema de Cassandra verificado/creado exitosamente.")
-
     except Exception as e:
-        logger.error(f"Error fatal al crear/verificar el schema de Cassandra: {e}", exc_info=True)
-        raise e # Relanzamos la excepción
+        logger.warning(f"No se pudo crear índice secundario (puede no ser soportado en algunas config de Astra): {e}")
+    
+    logger.info("Tablas e índices verificados correctamente.")
+
+# Función para inyección de dependencias (FastAPI)
+def get_db():
+    sess = get_cassandra_session()
+    try:
+        yield sess
+    finally:
+        pass

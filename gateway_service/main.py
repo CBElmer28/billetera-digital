@@ -50,6 +50,7 @@ origins = [
     "http://localhost:3002", # Por si acaso
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
+    "https://fronbilletera-digital-production.up.railway.app"
 ]
 
 app.add_middleware(

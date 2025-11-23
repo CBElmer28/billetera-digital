@@ -43,7 +43,17 @@ while attempts < max_attempts and engine is None:
     try:
         attempts += 1
         logger.info(f"Intentando conectar a MariaDB (Intento {attempts}/{max_attempts})...")
-        engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
+
+        # CORRECCIÓN PARA TIDB CLOUD: Configuración SSL
+        engine = create_engine(
+            SQLALCHEMY_DATABASE_URL, 
+            pool_pre_ping=True,
+            connect_args={
+                "ssl": {
+                    "ca": "/etc/ssl/certs/ca-certificates.crt"
+                }
+            }
+        )
 
         # Intenta conectar para verificar credenciales Y que la BD exista
         with engine.connect() as connection:

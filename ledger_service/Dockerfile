@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copia el código fuente de la aplicación
 COPY . .
 
+#Se copia el archivo de configuración seguro necesario para la conexión a la base de datos Cassandra en astra
+COPY secure-connect-pixel-money-ledger.zip /app/secure-connect-pixel-money-ledger.zip
+
 # Expone el puerto interno en el que escuchará el servidor Uvicorn
 EXPOSE 8000
 
