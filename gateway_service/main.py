@@ -26,15 +26,13 @@ BALANCE_URL = os.getenv("BALANCE_SERVICE_URL")
 LEDGER_URL = os.getenv("LEDGER_SERVICE_URL")
 GROUP_URL = os.getenv("GROUP_SERVICE_URL")
 
-# --- CORRECCIÓN: Validar si se leyeron los valores correctamente ---
-missing_urls = []
-if not AUTH_URL: missing_urls.append("AUTH_SERVICE_URL")
-if not BALANCE_URL: missing_urls.append("BALANCE_SERVICE_URL")
-if not LEDGER_URL: missing_urls.append("LEDGER_SERVICE_URL")
-if not GROUP_URL: missing_urls.append("GROUP_SERVICE_URL")
-
+# Verifica que las URLs estén definidas
+required_urls = {"AUTH_URL", "BALANCE_URL", "LEDGER_URL", "GROUP_URL"}
+missing_urls = required_urls - set(os.environ)
 if missing_urls:
     logger.critical(f"Faltan URLs de servicios internos en .env: {', '.join(missing_urls)}")
+    # El gateway no puede funcionar sin estas URLs.
+    # Lanzamos una excepción para detener el arranque.
     raise EnvironmentError(f"Faltan URLs de servicios internos: {', '.join(missing_urls)}")
 
 # Inicializa FastAPI
@@ -45,11 +43,13 @@ app = FastAPI(
 )
 
 # --- Configuración de CORS ---
-origins = [   
+origins = [
+    "http://localhost",      # Para pruebas simples
     "http://localhost:3000", # Grafana (o Frontend si Grafana está apagado)
     "http://localhost:3001", # 👈 TU NUEVO PUERTO DE FRONTEND (OFICIAL)
     "http://localhost:3002", # Por si acaso
-    "https://fronbilletera-digital-production.up.railway.app"
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
 ]
 
 app.add_middleware(
@@ -64,21 +64,18 @@ app.add_middleware(
 PUBLIC_ROUTES = [
     "/auth/login",
     "/auth/register",
-    "/auth/verify-phone",
-    "/auth/resend-code",
     "/health",
     "/metrics",
     "/docs",
     "/openapi.json",
     "/api/v1/inbound-transfer",
-    "/bank/stats",  
-    "/p2p/check" 
+    "/bank/stats"  
 ]
 
 
 
 # ... (cerca de PUBLIC_ROUTES) ...
-API_KEY_NAME = "x-wallet-b2b-key"
+API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False) # auto_error=False para manejo manual
 PARTNER_API_KEY = os.getenv("PARTNER_API_KEY")
 
@@ -287,20 +284,6 @@ async def proxy_login(request: Request):
     """Reenvía la solicitud de login (form-data) al servicio de autenticación."""
     logger.info("Proxying request to /auth/login")
     return await forward_request(request, f"{AUTH_URL}/login")
-
-# --- NUEVOS ENDPOINTS PÚBLICOS DE VERIFICACIÓN ---
-
-@app.post("/auth/verify-phone", tags=["Authentication"])
-async def proxy_verify_phone(request: Request):
-    """Reenvía la solicitud de verificación de código al servicio de autenticación."""
-    logger.info("Proxying request to /auth/verify-phone")
-    return await forward_request(request, f"{AUTH_URL}/verify-phone")
-
-@app.post("/auth/resend-code", tags=["Authentication"])
-async def proxy_resend_code(request: Request):
-    """Reenvía la solicitud de reenvío de código al servicio de autenticación."""
-    logger.info("Proxying request to /auth/resend-code")
-    return await forward_request(request, f"{AUTH_URL}/resend-code")
 
 
 # --- Endpoints Privados (Proxy para Auth) ---
@@ -745,6 +728,7 @@ async def proxy_bank_stats(request: Request):
 async def check_recipient_name(
     phone_number: str, 
     request: Request, 
+    user_id: int = Depends(get_current_user_id)
 ):
     """Permite al frontend validar el nombre del destinatario antes de transferir."""
     # Reenvía la consulta al Auth Service

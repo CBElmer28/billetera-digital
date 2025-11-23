@@ -1,8 +1,6 @@
 import logging
 import time
 import httpx
-import os # <-- Necesario para leer variables de entorno
-from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import Response
@@ -22,16 +20,7 @@ from utils import (
     create_access_token,
     decode_token,
     BALANCE_SERVICE_URL,
-    # --- IMPORTACIONES DE SEGURIDAD (Del Bloque 1) ---
-    generate_verification_code,
-    send_telegram_message,
-    VERIFICATION_CODE_EXPIRATION_MINUTES
 )
-
-# --- CONFIGURACIÓN MODO ESTRÉS ---
-# True = Se salta Telegram (comportamiento Bloque 2). 
-# False = Pide Telegram (comportamiento Bloque 1).
-STRESS_TEST_MODE = os.getenv("STRESS_TEST_MODE", "False").lower() == "true"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -45,26 +34,34 @@ try:
     logger.info("Database tables verified/created.")
 except Exception as e:
     logger.error(f"Error initializing database: {e}", exc_info=True)
+    
 
 # Inicializa FastAPI
 app = FastAPI(
     title="Auth Service - Pixel Money",
     description="Handles user registration, authentication, and token verification.",
-    version="1.1.0" # Actualizado por la fusión
+    version="1.0.0"
 )
 
-if STRESS_TEST_MODE:
-    logger.warning("⚠️ MODO STRESS ACTIVADO: Verificación por Telegram deshabilitada ⚠️")
-
 # --- Métricas Prometheus ---
-REQUEST_COUNT = Counter("auth_requests_total", "Total requests processed", ["method", "endpoint", "status_code"])
-REQUEST_LATENCY = Histogram("auth_request_latency_seconds", "Request latency in seconds", ["endpoint"])
+REQUEST_COUNT = Counter(
+    "auth_requests_total",
+    "Total requests processed by Auth Service",
+    ["method", "endpoint", "status_code"]
+)
+REQUEST_LATENCY = Histogram(
+    "auth_request_latency_seconds",
+    "Request latency in seconds for Auth Service",
+    ["endpoint"]
+)
 
+# --- Middleware para Métricas ---
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     start_time = time.time()
     response = None
-    status_code = 500 
+    status_code = 500 # Default a 500
+
     try:
         response = await call_next(request)
         status_code = response.status_code
@@ -72,249 +69,302 @@ async def metrics_middleware(request: Request, call_next):
         status_code = http_exc.status_code
         raise http_exc
     except Exception as exc:
-        logger.error(f"Unhandled exception: {exc}", exc_info=True)
+        logger.error(f"Unhandled exception during request processing: {exc}", exc_info=True)
+        
         return Response("Internal Server Error", status_code=500)
     finally:
         latency = time.time() - start_time
         endpoint = request.url.path
+
+
+        # Obtener status_code final de forma segura
         final_status_code = getattr(response, 'status_code', status_code)
+
         REQUEST_LATENCY.labels(endpoint=endpoint).observe(latency)
-        REQUEST_COUNT.labels(method=request.method, endpoint=endpoint, status_code=final_status_code).inc()
+        REQUEST_COUNT.labels(
+            method=request.method,
+            endpoint=endpoint,
+            status_code=final_status_code
+        ).inc()
+
     return response
 
 # --- Endpoints de Salud y Métricas ---
 @app.get("/metrics", tags=["Monitoring"])
 def metrics():
+    """Exposes application metrics for Prometheus."""
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/health", tags=["Monitoring"])
 def health_check():
-    return {"status": "ok", "service": "auth_service", "stress_mode": STRESS_TEST_MODE}
+    """Performs a basic health check of the service."""
+    
+    return {"status": "ok", "service": "auth_service"}
 
 # --- Endpoints de API ---
 
 @app.post("/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED, tags=["Authentication"])
 async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """
-    FUSIÓN INTELIGENTE:
-    - Si STRESS_TEST_MODE es True: Registra directo (estilo Bloque 2).
-    - Si STRESS_TEST_MODE es False: Usa Telegram (estilo Bloque 1).
+    Registers a new user with email and password.
+    Creates the user in the database and calls the Balance Service to create an associated account.
     """
     logger.info(f"Registration attempt for email: {user.email}")
+    db_user = db.query(User).filter(User.email == user.email).first()
+    if db_user:
+        logger.warning(f"Registration failed: Email {user.email} already exists.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
     
-    # 1. Validaciones Comunes
-    if db.query(User).filter(User.email == user.email).first():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email already registered")
-    if db.query(User).filter(User.phone_number == user.phone_number).first():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Número de celular ya registrado")
-    if db.query(User).filter(User.telegram_chat_id == user.telegram_chat_id).first():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ID de Chat de Telegram ya registrado")
+        
+    db_phone = db.query(User).filter(User.phone_number == user.phone_number).first()
+    if db_phone:
+        raise HTTPException(status_code=400, detail="Número de celular ya registrado")
+    
 
     hashed_password = get_password_hash(user.password)
 
-    # === RAMIFICACIÓN DE LÓGICA ===
-    
-    if STRESS_TEST_MODE:
-        # --- LÓGICA RÁPIDA (Simula Bloque 2) ---
-        new_user = User(
-            name=user.name,         
-            email=user.email,
-            hashed_password=hashed_password,
-            phone_number=user.phone_number,
-            telegram_chat_id=user.telegram_chat_id,
-            is_phone_verified=True, # Directamente verificado
-            phone_verification_code=None,
-            phone_verification_expires=None
-        )
-        # Guardar y llamar a Balance
-        try:
-            db.add(new_user)
-            db.commit()
-            db.refresh(new_user)
-        except Exception as e:
-            db.rollback()
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not save user.")
+    new_user = User(
+        name=user.name,        
+        email=user.email,
+        hashed_password=hashed_password,
+        phone_number=user.phone_number
+    )
 
-        # Llamada Sincrónica a Balance (Típica de stress tests)
-        async with httpx.AsyncClient() as client:
+    try:
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        logger.info(f"User created with ID: {new_user.id} for email: {user.email}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Database error during user creation for email {user.email}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not save user.")
+
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            create_account_url = f"{BALANCE_SERVICE_URL}/accounts"
+            response = await client.post(create_account_url, json={"user_id": new_user.id})
+            response.raise_for_status() 
+            logger.info(f"Successfully called Balance Service for user_id: {new_user.id}")
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.error(f"Failed to call Balance Service for user_id {new_user.id}: {exc}", exc_info=True)
+            
+            logger.warning(f"Attempting to revert user creation for user_id {new_user.id} due to Balance Service failure.")
             try:
-                create_account_url = f"{BALANCE_SERVICE_URL}/accounts"
-                response = await client.post(create_account_url, json={"user_id": new_user.id})
-                response.raise_for_status()
-            except Exception as exc:
-                # En modo estrés, si falla balance, borramos user
                 db.delete(new_user)
                 db.commit()
-                raise HTTPException(status_code=503, detail="Balance Service failed (Stress Mode).")
-        
-        return new_user
+                logger.info(f"Successfully reverted user creation for user_id {new_user.id}.")
+            except Exception as delete_e:
+                
+                logger.critical(f"CRITICAL: Failed to revert user creation for user_id {new_user.id}: {delete_e}", exc_info=True)
+               
 
-    else:
-        # --- LÓGICA SEGURA (Bloque 1 - Develop) ---
-        verification_code = generate_verification_code()
-        expires_at = datetime.utcnow() + timedelta(minutes=VERIFICATION_CODE_EXPIRATION_MINUTES)
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            detail = f"Balance Service unavailable or failed."
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                try: 
+                    detail = f"Balance Service error: {exc.response.json().get('detail', exc.response.text)}"
+                except: 
+                     detail = f"Balance Service error: Status {status_code}"
+            raise HTTPException(status_code=status_code, detail=detail)
 
-        new_user = User(
-            name=user.name,         
-            email=user.email,
-            hashed_password=hashed_password,
-            phone_number=user.phone_number,
-            telegram_chat_id=user.telegram_chat_id,
-            is_phone_verified=False, # <--- Importante: Falso al inicio
-            phone_verification_code=verification_code,
-            phone_verification_expires=expires_at
-        )
-
-        try:
-            db.add(new_user)
-            db.commit()
-            db.refresh(new_user)
-            logger.info(f"User created unverified ID: {new_user.id}")
-        except Exception as e:
-            db.rollback()
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not save user.")
-
-        # Enviar Telegram
-        try:
-            message = f"Hola *{new_user.name}*, bienvenido a Pixel Money.\nTu código de verificación es: `{verification_code}`\nEste código expira en {VERIFICATION_CODE_EXPIRATION_MINUTES} minutos."
-            await send_telegram_message(new_user.telegram_chat_id, message)
-        except Exception as e:
-            logger.error(f"Fallo envío Telegram: {e}")
-            # No revertimos, el usuario puede pedir reenvío
-
-        return new_user
+    return {
+        "id": new_user.id,
+        "name": new_user.name,
+        "email": new_user.email,
+        "phone_number": new_user.phone_number
+    }
 
 
 @app.post("/login", response_model=schemas.Token, tags=["Authentication"])
 def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    Authenticates a user based on email (as username) and password (form-data).
+    Returns a JWT access token upon successful authentication.
+    """
+    logger.info(f"Login attempt for user: {form_data.username}")
     user = db.query(User).filter(User.email == form_data.username).first()
+
     if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect email or password", headers={"WWW-Authenticate": "Bearer"})
+        logger.warning(f"Login failed for user: {form_data.username}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    token_data = {"sub": str(user.id), "name": user.name}
+  
+        # Preparamos el payload del token (¡EL ESTÁNDAR!)
+    # El 'sub' (subject) es el ID del usuario.
+    token_data = {
+        "sub": str(user.id),
+        "name": user.name # Añadimos el nombre para el frontend
+    }
+
     access_token = create_access_token(data=token_data)
+    logger.info(f"Login successful for user_id: {user.id}")
 
+    # ¡Devolvemos el objeto COMPLETO que el schema espera!
     return {
         "access_token": access_token, 
         "token_type": "bearer",
         "user_id": user.id,
         "name": user.name,
-        "email": user.email,
-        "is_phone_verified": user.is_phone_verified
+        "email": user.email
     }
-
-# --- ENDPOINTS DE VERIFICACIÓN (Del Bloque 1 - Develop) ---
-
-@app.post("/verify-phone", response_model=schemas.UserResponse, tags=["Authentication"])
-async def verify_phone(verification_data: schemas.PhoneVerificationRequest, db: Session = Depends(get_db)):
-    logger.info(f"Verificando {verification_data.phone_number}")
-    user = db.query(User).filter(User.phone_number == verification_data.phone_number).first()
-    
-    if not user: raise HTTPException(404, "Usuario no encontrado")
-    if user.is_phone_verified: raise HTTPException(400, "Ya verificado")
-    if user.phone_verification_code != verification_data.code: raise HTTPException(400, "Código incorrecto")
-    if not user.phone_verification_expires or user.phone_verification_expires < datetime.utcnow():
-        raise HTTPException(400, "Código expirado")
-
-    # Crear cuenta en Balance Service
-    if not BALANCE_SERVICE_URL: raise HTTPException(503, "Error config interna")
-
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(f"{BALANCE_SERVICE_URL}/accounts", json={"user_id": user.id})
-            response.raise_for_status()
-        except Exception as exc:
-            logger.error(f"Fallo Balance Service: {exc}")
-            raise HTTPException(503, "Error conectando con servicio de balance")
-
-    user.is_phone_verified = True
-    user.phone_verification_code = None
-    user.phone_verification_expires = None
-    db.commit()
-    db.refresh(user)
-    return user
-
-@app.post("/resend-code", status_code=status.HTTP_204_NO_CONTENT, tags=["Authentication"])
-async def resend_verification_code(request_data: schemas.RequestVerificationCode, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.phone_number == request_data.phone_number).first()
-    if not user: raise HTTPException(404, "Usuario no encontrado")
-    if user.is_phone_verified: raise HTTPException(400, "Ya verificado")
-
-    verification_code = generate_verification_code()
-    user.phone_verification_code = verification_code
-    user.phone_verification_expires = datetime.utcnow() + timedelta(minutes=VERIFICATION_CODE_EXPIRATION_MINUTES)
-    db.commit()
-
-    try:
-        message = f"Tu nuevo código es: `{verification_code}`"
-        await send_telegram_message(user.telegram_chat_id, message)
-    except:
-        raise HTTPException(503, "Error enviando mensaje")
-    
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 @app.get("/users/{user_id}", response_model=schemas.UserResponse, tags=["Users"])
 async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
+    """
+    Retorna la información del usuario por su ID.
+    Usado internamente por el API Gateway al llamar /auth/me.
+    """
+    logger.info(f"Solicitud de datos para usuario con ID {user_id}")
+
     user = db.query(User).filter(User.id == user_id).first()
-    if not user: raise HTTPException(404, "Usuario no encontrado")
-    return user
+    if not user:
+        logger.warning(f"Usuario con ID {user_id} no encontrado.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado.",
+        )
+
+    logger.info(f"Usuario encontrado: {user.email} (ID: {user.id})")
+
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "phone_number": user.phone_number
+    }
+
 
 @app.get("/verify", response_model=schemas.TokenPayload, tags=["Internal"])
 def verify(token: str): 
+    """
+    Valida un token JWT (pasado como query parameter 'token') y devuelve su payload.
+    Usado por el API Gateway.
+    """
     payload = decode_token(token)
-    if not payload or "sub" not in payload: raise HTTPException(401, "Token inválido")
+    if payload is None or "sub" not in payload: # Doble verificación
+     logger.warning("Intento de verificación con token inválido, expirado o sin 'sub'.")
+     raise HTTPException(
+         status_code=status.HTTP_401_UNAUTHORIZED,
+         detail="Invalid or expired token",
+     )
+
+    # Devolvemos el payload que SÍ coincide con schemas.TokenPayload
+    # (El gateway_service ahora leerá 'sub' sin problemas)
     return {"sub": payload.get("sub"), "exp": payload.get("exp"), "name": payload.get("name")}
 
-@app.get("/users/by-phone/{phone_number}", response_model=schemas.UserResponse, tags=["Users"])
-def get_user_by_phone(phone_number: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.phone_number == phone_number).first()
-    if not user: raise HTTPException(404, "Usuario no encontrado")
-    return user
-
-@app.post("/users/bulk", response_model=List[schemas.UserResponse], tags=["Users"])
-def get_users_bulk(req: schemas.UserBulkRequest, db: Session = Depends(get_db)):
-    return db.query(User).filter(User.id.in_(req.user_ids)).all()
-
 @app.post("/users/{user_id}/change-password", tags=["Users"])
-def change_password(user_id: int, req: schemas.PasswordChangeRequest, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    # Lógica de cambio de contraseña (Del bloque 1/2 fusionados)
-    payload = decode_token(token)
-    if not payload or int(payload.get("sub")) != user_id: raise HTTPException(403, "No autorizado")
-
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user: raise HTTPException(404, "Usuario no encontrado")
-
-    if not verify_password(req.current_password, user.hashed_password): raise HTTPException(400, "Password actual incorrecto")
-    if req.new_password != req.confirm_password: raise HTTPException(400, "Confirmación no coincide")
+def change_user_password(
+    user_id: int, 
+    req: schemas.PasswordChangeRequest, 
+    db: Session = Depends(get_db)
+):
+    """Cambia la contraseña del usuario validando la actual."""
+    logger.info(f"Intento de cambio de contraseña para user_id: {user_id}")
     
-    user.hashed_password = get_password_hash(req.new_password)
-    db.commit()
-    return {"message": "Contraseña actualizada"}
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
 
-# --- ENDPOINT NUEVO (Del Bloque 2 - Feature Stress Test) ---
+    # 1. Verificar que la contraseña actual sea correcta
+    if not verify_password(req.current_password, user.hashed_password):
+        logger.warning(f"Fallo cambio de password user {user_id}: Password actual incorrecto")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "La contraseña actual es incorrecta.")
+
+    # 2. Encriptar la nueva contraseña
+    user.hashed_password = get_password_hash(req.new_password)
+    
+    try:
+        db.commit()
+        logger.info(f"Contraseña actualizada exitosamente para user {user_id}")
+        return {"message": "Contraseña actualizada correctamente"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error DB al cambiar password: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al actualizar contraseña")
+    
+
+# En auth_service/main.py (Junto a los otros endpoints de usuario)
 
 @app.delete("/users/{user_id}", tags=["Users"])
 async def delete_user(user_id: int, db: Session = Depends(get_db)):
     """
-    Elimina el usuario. Coordina con Balance Service (Feature traída del Bloque 2).
+    Elimina el usuario del sistema.
+    Coordina con Balance Service para verificar deudas primero.
     """
-    logger.info(f"Eliminando usuario {user_id}")
+    logger.info(f"Iniciando proceso de eliminación para usuario {user_id}")
+    
     user = db.query(User).filter(User.id == user_id).first()
-    if not user: raise HTTPException(404, "Usuario no encontrado")
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
 
-    if not BALANCE_SERVICE_URL: raise HTTPException(500, "Error configuración Balance URL")
+    # 1. Llamar a Balance Service para verificar y borrar datos financieros
+    if not BALANCE_SERVICE_URL:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Configuración interna incompleta (Balance URL)")
 
-    # Llamada a Balance Service para borrar datos
     async with httpx.AsyncClient() as client:
         try:
             response = await client.delete(f"{BALANCE_SERVICE_URL}/accounts/{user_id}")
+            
+            # Si Balance Service dice que hay deuda (400), detenemos todo
             if response.status_code == 400:
-                raise HTTPException(400, response.json().get('detail', 'Deuda pendiente'))
-            response.raise_for_status()
+                detail = response.json().get('detail', 'Deuda pendiente')
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, detail)
+                
+            response.raise_for_status() # Para otros errores (500, etc)
+            
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 400: raise HTTPException(400, e.response.json().get('detail'))
-            raise HTTPException(503, "Error contactando Balance Service")
+            # Re-lanzamos el error específico si viene del microservicio
+            if e.response.status_code == 400:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, e.response.json().get('detail'))
+            logger.error(f"Error contactando Balance Service: {e}")
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No se pudo verificar el estado financiero.")
 
-    db.delete(user)
-    db.commit()
-    return {"message": "Cuenta eliminada"}
+    # 2. Si llegamos aquí, no hay deuda. Procedemos a borrar el usuario.
+    try:
+        db.delete(user)
+        db.commit()
+        logger.info(f"Usuario {user_id} eliminado permanentemente.")
+        return {"message": "Cuenta eliminada exitosamente"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error DB borrando usuario: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al eliminar usuario")
+
+
+
+@app.get("/users/by-phone/{phone_number}", response_model=schemas.UserResponse, tags=["Users"])
+def get_user_by_phone(phone_number: str, db: Session = Depends(get_db)):
+    """
+    Busca un usuario por su número de celular.
+    (Usado internamente por ledger_service para transferencias P2P).
+    """
+    logger.info(f"Buscando usuario por número de celular: {phone_number}")
+    db_user = db.query(User).filter(User.phone_number == phone_number).first()
+    if db_user is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado con ese número de celular")
+    return db_user
+
+# ... (después de 'get_user_by_phone')
+
+@app.post("/users/bulk", response_model=List[schemas.UserResponse], tags=["Users"])
+def get_users_bulk(req: schemas.UserBulkRequest, db: Session = Depends(get_db)):
+    """
+    Obtiene los detalles públicos de una lista de IDs de usuario.
+    Usado por group_service para enriquecer la lista de miembros.
+    """
+    logger.info(f"Solicitud de datos para {len(req.user_ids)} usuarios.")
+
+    # Usamos 'in_' para buscar múltiples IDs a la vez en la BD
+    users = db.query(User).filter(User.id.in_(req.user_ids)).all()
+
+    return users
