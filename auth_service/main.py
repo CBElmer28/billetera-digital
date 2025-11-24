@@ -8,7 +8,7 @@ from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from sqlalchemy.orm import Session
 from typing import Optional, List
-
+from utils import get_name_from_reniec
 
 # Importaciones locales
 from db import engine, Base, get_db
@@ -112,43 +112,42 @@ def health_check():
 @app.post("/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED, tags=["Authentication"])
 async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """
-    Registers a new user with email and password.
-    Creates the user in the database and calls the Balance Service to create an associated account.
+    Registra usuario usando DNI. El nombre se obtiene automáticamente de RENIEC.
     """
-    logger.info(f"Registration attempt for email: {user.email}")
-    db_user = db.query(User).filter(User.email == user.email).first()
-    if db_user:
-        logger.warning(f"Registration failed: Email {user.email} already exists.")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered",
-        )
-    
-        
-    db_phone = db.query(User).filter(User.phone_number == user.phone_number).first()
-    if db_phone:
-        raise HTTPException(status_code=400, detail="Número de celular ya registrado")
-    
+    logger.info(f"Registro iniciado para DNI: {user.dni}")
 
+    # 1. Validaciones de Unicidad
+    if db.query(User).filter(User.email == user.email).first():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email ya registrado.")
+    if db.query(User).filter(User.phone_number == user.phone_number).first():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Celular ya registrado.")
+    if db.query(User).filter(User.dni == user.dni).first():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "DNI ya registrado.")
+
+    # 2. Obtener Nombre Automático
+    real_name = await get_name_from_reniec(user.dni)
+    logger.info(f"RENIEC devolvió: {real_name}")
+
+    # 3. Crear Usuario
     hashed_password = get_password_hash(user.password)
-
     new_user = User(
-        name=user.name,        
+        dni=user.dni,
+        name=real_name, # <-- Aquí ocurre la magia
         email=user.email,
-        hashed_password=hashed_password,
-        phone_number=user.phone_number
+        phone_number=user.phone_number,
+        hashed_password=hashed_password
     )
 
     try:
         db.add(new_user)
         db.commit()
         db.refresh(new_user)
-        logger.info(f"User created with ID: {new_user.id} for email: {user.email}")
     except Exception as e:
         db.rollback()
-        logger.error(f"Database error during user creation for email {user.email}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not save user.")
+        logger.error(f"DB Error: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error guardando usuario.")
 
+    # 4. Crear Cuenta en Balance (Igual que antes)
     async with httpx.AsyncClient() as client:
         try:
             create_account_url = f"{BALANCE_SERVICE_URL}/accounts"
@@ -187,11 +186,10 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
         user_id=new_user.id,
         phone_number=new_user.phone_number,
         user_name=new_user.name,
-        auth_token=temp_token_for_central
+        auth_token=temp_token
     )
 
     return new_user
-
     
 
 
@@ -232,11 +230,14 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
         "email": user.email
     }
 
+
+
+
 @app.get("/users/{user_id}", response_model=schemas.UserResponse, tags=["Users"])
 async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
     """
     Retorna la información del usuario por su ID.
-    Usado internamente por el API Gateway al llamar /auth/me.
+    Usado internamente por el API Gateway y Ledger.
     """
     logger.info(f"Solicitud de datos para usuario con ID {user_id}")
 
@@ -248,15 +249,11 @@ async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
             detail="Usuario no encontrado.",
         )
 
-    logger.info(f"Usuario encontrado: {user.email} (ID: {user.id})")
-
-    return {
-        "id": user.id,
-        "name": user.name,
-        "email": user.email,
-        "phone_number": user.phone_number
-    }
-
+    # --- CORRECCIÓN AQUÍ ---
+    # Antes devolvíamos un dict manual {id, name...} y faltaba el DNI.
+    # Ahora devolvemos el objeto 'user' completo. 
+    # Gracias a `from_attributes=True` en el schema, Pydantic extraerá el DNI solito.
+    return user
 
 @app.get("/verify", response_model=schemas.TokenPayload, tags=["Internal"])
 def verify(token: str): 
@@ -306,6 +303,31 @@ def change_user_password(
         logger.error(f"Error DB al cambiar password: {e}")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al actualizar contraseña")
     
+
+@app.post("/users/{user_id}/verify-password", tags=["Internal"])
+def verify_password_endpoint(
+    user_id: int,
+    check: schemas.PasswordCheck,  # <--- NOTA: Se usa el prefijo 'schemas.'
+    db: Session = Depends(get_db)
+):
+    """
+    Valida si la contraseña enviada coincide con la del usuario.
+    Uso interno para confirmar transacciones sensibles.
+    """
+    # 1. Buscar usuario
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
+    
+    # 2. Verificar contraseña usando la utilidad existente
+    if not verify_password(check.password, user.hashed_password):
+        # Retornamos 401 si está mal
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Contraseña incorrecta")
+    
+    # 3. Si todo ok
+    return {"valid": True}
+
+
 
 # En auth_service/main.py (Junto a los otros endpoints de usuario)
 

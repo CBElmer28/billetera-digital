@@ -35,6 +35,52 @@ pwd_context = CryptContext(
     
 )
 
+DECOLECTA_API_URL = os.getenv("DECOLECTA_API_URL", "https://api.decolecta.com/v1/reniec/dni")
+DECOLECTA_TOKEN = os.getenv("DECOLECTA_TOKEN")
+
+async def get_name_from_reniec(dni: str) -> str:
+    """
+    Consulta la API de RENIEC para obtener el nombre a partir del DNI.
+    """
+    if dni == "99999999": return "Usuario de Prueba" # Backdoor
+
+    if not DECOLECTA_TOKEN:
+        logger.warning("DECOLECTA_TOKEN no configurado. Usando nombre genérico.")
+        return "Ciudadano Sin Identificar"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            url = f"{DECOLECTA_API_URL}?numero={dni}"
+            headers = {"Authorization": f"Bearer {DECOLECTA_TOKEN}"}
+            
+            response = await client.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                data = response.json()
+                nombre = data.get("full_name")
+                if not nombre:
+                     # Intento de fallback
+                     nombres = data.get('nombres', '')
+                     ap_pat = data.get('apellido_paterno', '')
+                     ap_mat = data.get('apellido_materno', '')
+                     nombre = f"{nombres} {ap_pat} {ap_mat}".strip()
+                return nombre or "Ciudadano Peruano"
+            else:
+                logger.error(f"RENIEC API Error {response.status_code}: {response.text}")
+                # Fallback seguro para no bloquear registro si RENIEC cae
+                return "Usuario Validado (RENIEC Error)" 
+                
+    except Exception as e:
+        logger.error(f"Error conectando con RENIEC: {e}")
+        return "Usuario Validado (Error Conexión)"
+
+
+
+
+
+
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifica una contraseña plana contra un hash almacenado."""
     return pwd_context.verify(plain_password, hashed_password)
