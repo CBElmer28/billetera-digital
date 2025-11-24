@@ -831,7 +831,7 @@ async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
         "central_tx_id": central_tx_id,
         "from_app": from_app_name,
         "from_user": from_user_name,
-        "description": payload.get("descripcion", "Transferencia Interbancaria")
+        "description": payload.get("description", "Transferencia Interbancaria")
     }
     metadata_json = json.dumps(metadata)
 
