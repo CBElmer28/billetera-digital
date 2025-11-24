@@ -4,6 +4,8 @@ import os
 import logging
 import httpx 
 import bcrypt 
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -16,6 +18,11 @@ load_dotenv()
 
 # Configuración del logger
 logger = logging.getLogger(__name__)
+
+SMTP_HOST = os.getenv("SMTP_HOST", "mailhog") 
+SMTP_PORT = int(os.getenv("SMTP_PORT", 1025))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 # --- Configuración de Seguridad ---
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
@@ -187,3 +194,53 @@ async def register_user_in_central(user_id: int, phone_number: str, user_name: s
 BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 if not BALANCE_SERVICE_URL:
      logger.error("Variable de entorno BALANCE_SERVICE_URL no está definida.")
+
+# --- CONFIGURACIÓN DE GMAIL ---
+
+def create_password_reset_token(email: str):
+    """Genera un JWT de corta duración exclusivo para resetear password"""
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {"sub": email, "type": "password_reset", "exp": expire}
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_reset_token(token: str):
+    """Valida el token y extrae el email"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "password_reset":
+            return None
+        email: str = payload.get("sub")
+        return email
+    except JWTError:
+        return None
+
+def send_reset_email(to_email: str, token: str):
+    """Envía el correo con el link de recuperación"""
+    # En un caso real, esto sería una URL de tu Frontend, ej: https://tusitio.com/reset?token=...
+    reset_link = f"http://localhost:3000/reset-password?token={token}"
+    
+    msg = EmailMessage()
+    msg.set_content(f"""
+    Hola,
+    
+    Has solicitado restablecer tu contraseña.
+    Haz clic en el siguiente enlace para continuar:
+    
+    {reset_link}
+    
+    Este enlace expira en {RESET_TOKEN_EXPIRE_MINUTES} minutos.
+    Si no fuiste tú, ignora este mensaje.
+    """)
+    
+    msg['Subject'] = "Recuperación de Contraseña - Pixel Money"
+    msg['From'] = "no-reply@pixelmoney.com"
+    msg['To'] = to_email
+
+    try:
+        # Conexión al servidor SMTP (MailHog)
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.send_message(msg)
+            print(f"Correo enviado a {to_email}")
+    except Exception as e:
+        print(f"Error enviando correo: {e}")

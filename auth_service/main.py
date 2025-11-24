@@ -3,7 +3,7 @@ import time
 import os
 import httpx 
 import uuid 
-from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Request, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -26,7 +26,10 @@ from utils import (
     CENTRAL_API_URL,
     CENTRAL_WALLET_TOKEN,
     APP_NAME,
-    register_user_in_central
+    register_user_in_central,
+    create_password_reset_token, 
+    verify_reset_token, 
+    send_reset_email, 
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
@@ -431,3 +434,49 @@ def get_users_bulk(req: schemas.UserBulkRequest, db: Session = Depends(get_db)):
     users = db.query(User).filter(User.id.in_(req.user_ids)).all()
 
     return users
+
+@app.post("/request-password-reset", status_code=200)
+async def request_password_reset(
+    request: PasswordResetRequest, 
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    # 1. Buscar usuario
+    user = db.query(User).filter(User.email == request.email).first()
+    
+    # 2. Si el usuario existe, procesar. 
+    # IMPORTANTE: Por seguridad, siempre respondemos "Si el correo existe, se envió..." 
+    # para no revelar qué correos están registrados.
+    if user:
+        # Generar token
+        token = create_password_reset_token(user.email)
+        # Enviar email en segundo plano
+        background_tasks.add_task(send_reset_email, user.email, token)
+    
+    return {"message": "Si el correo está registrado, recibirás instrucciones en breve."}
+
+# Endpoint 2: Confirmar cambio
+@app.post("/reset-password", status_code=200)
+async def reset_password(
+    request: PasswordResetConfirm,
+    db: Session = Depends(get_db)
+):
+    # 1. Validar que las contraseñas coincidan
+    if request.new_password != request.confirm_password:
+        raise HTTPException(status_code=400, detail="Las contraseñas no coinciden")
+
+    # 2. Validar token
+    email = verify_reset_token(request.token)
+    if not email:
+        raise HTTPException(status_code=400, detail="Token inválido o expirado")
+
+    # 3. Buscar usuario
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # 4. Actualizar contraseña
+    user.hashed_password = get_password_hash(request.new_password)
+    db.commit()
+
+    return {"message": "Contraseña actualizada correctamente"}
