@@ -899,6 +899,7 @@ async def send_money_central(
         logger.critical("Configuración Central incompleta.")
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Servicio no disponible")
 
+    tx_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
     currency = "PEN"
     
@@ -940,6 +941,7 @@ async def send_money_central(
                 "toIdentifier": req.destination_phone_number,
                 "toAppName": req.to_bank, 
                 "amount": req.amount,
+                "externalTransactionId": str(tx_id),
                 "description": req.description or "Transferencia Pixel Money"
             }
 
