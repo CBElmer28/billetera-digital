@@ -785,13 +785,28 @@ async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
     try:
         # La Central envía 'internalWalletId' como string, pero tu sistema usa int.
         # Si falla la conversión, es un intento inválido.
-        internal_user_id = payload.get("internalWalletId") 
+        internal_user_id = int(payload.get("internalWalletId")) 
         
         amount = float(payload.get("monto"))
         if amount <= 0:
             raise ValueError("El monto debe ser positivo")
 
         central_tx_id = payload.get("centralTransactionId")
+
+        namespace_uuid = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8') # Namespace DNS
+        idempotency_key_uuid = uuid.uuid5(namespace_uuid, central_tx_id)
+
+        existing_tx_id = check_idempotency(db, str(idempotency_key_uuid))
+        if existing_tx_id:
+            logger.info(f"Webhook duplicado (Central ID: {central_tx_id}). Ignorando.")
+        # Importante: Devolver 200 OK y el ID existente para que la Central deje de reintentar
+            return {
+            "success": True,
+            "localTransactionId": str(existing_tx_id)
+            }
+
+
+
         from_app_name = payload.get("fromAppName", "CentralAPI")
         from_user_name = payload.get("fromUserName", "Desconocido")
         
@@ -846,6 +861,7 @@ async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
             logger.error(f"Error de conexión Balance Service: {e}")
             raise HTTPException(status_code=503, detail="Error de conexión interno")
 
+    db.execute(f"INSERT INTO {KEYSPACE}.idempotency_keys (key, transaction_id) VALUES (%s, %s)", (idempotency_key_uuid, tx_id))
     # --- PASO 4: Registrar en Historial (Cassandra) ---
     try:
         decimal_amount = Decimal(str(amount))
@@ -944,6 +960,7 @@ async def send_money_central(
                 "externalTransactionId": str(tx_id),
                 "description": req.description or "Transferencia Pixel Money"
             }
+            logger.info(f"Enviando a Central: {central_payload}")
 
             # 2c. Headers
             central_headers = {
