@@ -144,14 +144,14 @@ APP_NAME = os.getenv("APP_NAME", "PIXEL MONEY") # Valor por defecto si no está 
 
 logger = logging.getLogger(__name__)
 
-async def register_user_in_central(user_id: int, phone_number: str, user_name: str, auth_token: str) -> str | None:
+async def register_user_in_central(user_id: int, phone_number: str, user_name: str, auth_token: str) -> None:
     """
     Registra al usuario en la API Centralizada.
-    Retorna el wallet_uuid si es exitoso, o None si falla.
+    Solo realiza la llamada (Fire and Forget), no retorna datos.
     """
     if not CENTRAL_API_URL or not CENTRAL_WALLET_TOKEN:
         logger.warning("Configuración de API Central incompleta. Saltando registro central.")
-        return None
+        return None # Salimos sin hacer nada
 
     url = f"{CENTRAL_API_URL}/register-wallet"
     
@@ -173,21 +173,14 @@ async def register_user_in_central(user_id: int, phone_number: str, user_name: s
             logger.info(f"Registrando en API Central: {payload}")
             response = await client.post(url, json=payload, headers=headers)
             
+            # Solo verificamos el status code para loguear éxito o error
             if response.status_code in [200, 201]:
-                data = response.json()
-                # La estructura de respuesta puede variar (data o directo)
-                wallet_data = data.get("data", data) 
-                wallet_uuid = wallet_data.get("wallet_uuid")
-                
-                logger.info(f"Registro Central exitoso. UUID: {wallet_uuid}")
-                return wallet_uuid
+                logger.info(f"Registro en API Central exitoso para usuario {user_id}.")
             else:
                 logger.error(f"Fallo registro Central ({response.status_code}): {response.text}")
-                return None
 
     except Exception as e:
         logger.error(f"Error de conexión con API Central: {e}")
-        return None
 
 # --- Service Discovery ---
 # URL interna para el Balance Service

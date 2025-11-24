@@ -150,25 +150,44 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     # 4. Crear Cuenta en Balance (Igual que antes)
     async with httpx.AsyncClient() as client:
         try:
-            res = await client.post(f"{BALANCE_SERVICE_URL}/accounts", json={"user_id": new_user.id})
-            res.raise_for_status()
-        except Exception as exc:
-            logger.error(f"Fallo Balance: {exc}")
-            db.delete(new_user)
-            db.commit()
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error creando cuenta financiera.")
+            create_account_url = f"{BALANCE_SERVICE_URL}/accounts"
+            response = await client.post(create_account_url, json={"user_id": new_user.id})
+            response.raise_for_status() 
+            logger.info(f"Successfully called Balance Service for user_id: {new_user.id}")
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.error(f"Failed to call Balance Service for user_id {new_user.id}: {exc}", exc_info=True)
+            
+            logger.warning(f"Attempting to revert user creation for user_id {new_user.id} due to Balance Service failure.")
+            try:
+                db.delete(new_user)
+                db.commit()
+                logger.info(f"Successfully reverted user creation for user_id {new_user.id}.")
+            except Exception as delete_e:
+                
+                logger.critical(f"CRITICAL: Failed to revert user creation for user_id {new_user.id}: {delete_e}", exc_info=True)
+               
 
-    # 5. Registrar en Central (Igual que antes)
-    temp_token = create_access_token(data={"sub": str(new_user.id), "name": new_user.name})
-    wallet_uuid = await register_user_in_central(
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            detail = f"Balance Service unavailable or failed."
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                try: 
+                    detail = f"Balance Service error: {exc.response.json().get('detail', exc.response.text)}"
+                except: 
+                     detail = f"Balance Service error: Status {status_code}"
+            raise HTTPException(status_code=status_code, detail=detail)
+
+    # 4. Llamar a API Central (SAGA Paso 2 - Doble Registro)
+    # Generamos un token temporal válido para la Central (con la SECRET_KEY compartida)
+    temp_token_for_central = create_access_token(data={"sub": str(new_user.id), "name": new_user.name})
+    
+    # Usamos la función de utilidad que encapsula la complejidad
+    await register_user_in_central(
         user_id=new_user.id,
         phone_number=new_user.phone_number,
         user_name=new_user.name,
         auth_token=temp_token
     )
-    if wallet_uuid:
-        new_user.central_wallet_id = wallet_uuid
-        db.commit()
 
     return new_user
     
