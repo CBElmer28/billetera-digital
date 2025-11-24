@@ -179,7 +179,7 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
     # 4. Llamar a API Central (SAGA Paso 2 - Doble Registro)
     # Generamos un token temporal válido para la Central (con la SECRET_KEY compartida)
-    temp_token_for_central = create_access_token(data={"sub": str(new_user.id), "name": new_user.name})
+    temp_token = create_access_token(data={"sub": str(new_user.id), "name": new_user.name})
     
     # Usamos la función de utilidad que encapsula la complejidad
     await register_user_in_central(
