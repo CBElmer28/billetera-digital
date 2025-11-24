@@ -636,137 +636,119 @@ async def get_daily_balance(
         logger.error(f"Error al calcular balance diario para {user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al calcular el balance diario.")
     
+
 @app.post("/transfer/p2p", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Transactions"])
 async def transfer_p2p(
     req: schemas.P2PTransferRequest,
     idempotency_key: Optional[str] = Header(None, description="Clave única (UUID v4) para idempotencia"),
     db: Session = Depends(get_db)
 ):
-    """
-    Procesa una transferencia P2P (BDI -> BDI) entre usuarios de Pixel Money.
-    Orquesta una SAGA:
-    1. Resuelve el celular del destinatario (Auth Service).
-    2. Verifica y Debita al remitente (Balance Service).
-    3. Acredita al destinatario (Balance Service).
-    4. Si falla el crédito, revierte el débito.
-    5. Escribe ambas transacciones en Cassandra (Batch).
-    """
     if idempotency_key is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cabecera Idempotency-Key es requerida")
 
-    sender_id = req.user_id # Inyectado por el Gateway
+    sender_id = req.user_id 
     recipient_phone = req.destination_phone_number
     amount = req.amount
 
-    # 0. Evitar auto-transferencias (Requerimiento de negocio)
-    # (Necesitamos el celular del sender, pero no lo tenemos. Lo omitimos por ahora)
-
-    # 1. Verificar Idempotencia
     existing_tx_id = check_idempotency(db, idempotency_key)
     if existing_tx_id:
-        logger.info(f"Transferencia P2P duplicada (Key: {idempotency_key}). Devolviendo tx: {existing_tx_id}")
+        logger.info(f"Transferencia P2P duplicada. Devolviendo tx: {existing_tx_id}")
         tx_data = await get_transaction_by_id(db, existing_tx_id)
         if tx_data: return schemas.Transaction(**tx_data)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de idempotencia: Tx original no encontrada")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de idempotencia")
 
-    tx_id_debit = uuid.uuid4() # ID para la transacción de salida
-    tx_id_credit = uuid.uuid4() # ID para la transacción de entrada
+    tx_id_debit = uuid.uuid4()
+    tx_id_credit = uuid.uuid4()
     now = datetime.now(timezone.utc)
     currency = "PEN"
     recipient_id = None
+    
+    # Variables para guardar nombres y mejorar el historial
+    sender_name = "Usuario Pixel" 
+    recipient_name = "Usuario Pixel"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            # --- PASO 1: Resolver Destinatario (AUTH SERVICE) ---
-            logger.debug(f"Tx {tx_id_debit}: Buscando destinatario por celular: {recipient_phone}")
-            auth_res = await client.get(f"{AUTH_SERVICE_URL}/users/by-phone/{recipient_phone}")
-            auth_res.raise_for_status() # Lanza 404 si el usuario no existe
-
-            recipient_id = int(auth_res.json()["id"])
-            if recipient_id == sender_id:
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes transferirte dinero a ti mismo.")
-
-            # --- PASO 2: Verificar y Debitar Remitente (BALANCE SERVICE) ---
-            logger.debug(f"Tx {tx_id_debit}: Verificando fondos y debitando a user_id {sender_id}")
-
-            # Verificamos fondos (el 'check' ya está en el 'debit', pero es buena práctica)
-            check_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/check", json={"user_id": sender_id, "amount": amount})
-            check_res.raise_for_status() # Lanza 400 si no hay fondos
-
-            # Debitamos
-            debit_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/debit", json={"user_id": sender_id, "amount": amount})
-            debit_res.raise_for_status() # Lanza 400 si falla en la concurrencia
-
-            logger.info(f"Tx {tx_id_debit}: Débito de {amount} a {sender_id} exitoso.")
-
-            # --- PASO 3: Acreditar Destinatario (BALANCE SERVICE) ---
+            # 1. Obtener datos del REMITENTE (Para guardarlos en el historial del destino)
+            # Esto es lo nuevo: Buscamos quién envía para que el otro sepa quién fue
             try:
-                logger.debug(f"Tx {tx_id_credit}: Acreditando {amount} a user_id {recipient_id}")
+                sender_res = await client.get(f"{AUTH_SERVICE_URL}/users/{sender_id}")
+                if sender_res.status_code == 200:
+                    sender_data = sender_res.json()
+                    sender_name = sender_data.get("name", "Usuario Pixel")
+            except Exception as e:
+                logger.warning(f"No se pudo obtener nombre del sender: {e}")
+
+            # 2. Resolver DESTINATARIO
+            logger.debug(f"Tx {tx_id_debit}: Buscando destinatario: {recipient_phone}")
+            auth_res = await client.get(f"{AUTH_SERVICE_URL}/users/by-phone/{recipient_phone}")
+            auth_res.raise_for_status()
+            
+            recipient_data = auth_res.json()
+            recipient_id = int(recipient_data["id"])
+            recipient_name = recipient_data.get("name", "Usuario Destino")
+
+            if recipient_id == sender_id:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes transferirte a ti mismo.")
+
+            # 3. Verificar y Debitar Remitente
+            check_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/check", json={"user_id": sender_id, "amount": amount})
+            check_res.raise_for_status()
+
+            debit_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/debit", json={"user_id": sender_id, "amount": amount})
+            debit_res.raise_for_status()
+
+            # 4. Acreditar Destinatario
+            try:
                 credit_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/credit", json={"user_id": recipient_id, "amount": amount})
                 credit_res.raise_for_status()
-                logger.info(f"Tx {tx_id_credit}: Crédito a {recipient_id} exitoso.")
-
-            except Exception as credit_error:
-                # ¡FALLO CRÍTICO! El débito se hizo pero el crédito falló.
-                # --- INICIO DE REVERSIÓN (SAGA) ---
-                logger.error(f"¡FALLO DE SAGA! Tx {tx_id_credit} falló. Revertiendo débito {tx_id_debit} para {sender_id}...")
-                try:
-                    revert_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/credit", json={"user_id": sender_id, "amount": amount})
-                    revert_res.raise_for_status()
-                    logger.info(f"Reversión de débito {tx_id_debit} para {sender_id} exitosa.")
-                except Exception as revert_error:
-                    logger.critical(f"¡¡FALLO CRÍTICO DE REVERSIÓN!! El débito {tx_id_debit} no pudo ser revertido. ¡REQUERIRÁ INTERVENCIÓN MANUAL! Error: {revert_error}")
-                
-                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "El servicio del destinatario falló. La transacción ha sido revertida.")
+            except Exception:
+                # Reversión si falla crédito
+                await client.post(f"{BALANCE_SERVICE_URL}/balance/credit", json={"user_id": sender_id, "amount": amount})
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Fallo destino. Revertido.")
 
         except httpx.HTTPStatusError as e:
-            # Error de 'check' (400), 'auth' (404), o 'debit' (400)
             status_code = e.response.status_code
-            detail = e.response.json().get("detail", "Error en servicios internos.")
-            logger.warning(f"Fallo transferencia P2P: {detail} (Status: {status_code})")
+            detail = e.response.json().get("detail", "Error interno.")
             raise HTTPException(status_code=status_code, detail=detail)
+        except httpx.RequestError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error de comunicación.")
 
-        except httpx.RequestError as e:
-            logger.error(f"Error de red en transferencia P2P: {e}", exc_info=True)
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error de comunicación entre servicios.")
-
-    # --- PASO 4: Escribir en Cassandra (BATCH) ---
-    # --- PASO 4: Escribir en Cassandra (BATCH) ---
+    # --- PASO FINAL: Guardar en Cassandra con METADATOS ---
     try:
         batch = BatchStatement()
-
-        # 1. Lado del REMITENTE (El que envía - P2P_SENT)
-        # Guardamos en la tabla principal y en el historial del usuario
-        q_sent_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at) VALUES (%s, %s, 'BDI', %s, 'BDI', %s, 'P2P_SENT', %s, %s, 'COMPLETED', %s, %s)")
-        q_sent_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at) VALUES (%s, %s, %s, 'BDI', %s, 'BDI', %s, 'P2P_SENT', %s, %s, 'COMPLETED', %s)")
         
-        batch.add(q_sent_id, (tx_id_debit, sender_id, str(sender_id), str(recipient_id), amount, currency, now, now))
-        batch.add(q_sent_user, (sender_id, now, tx_id_debit, str(sender_id), str(recipient_id), amount, currency, now))
-
-        # 2. Lado del DESTINATARIO (El que recibe - P2P_RECEIVED) - ¡ESTO FALTABA!
-        q_recv_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at) VALUES (%s, %s, 'BDI', %s, 'BDI', %s, 'P2P_RECEIVED', %s, %s, 'COMPLETED', %s, %s)")
-        q_recv_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at) VALUES (%s, %s, %s, 'BDI', %s, 'BDI', %s, 'P2P_RECEIVED', %s, %s, 'COMPLETED', %s)")
+        # Metadatos enriquecidos
+        meta_sent = json.dumps({"destination_phone": recipient_phone, "destination_name": recipient_name})
         
-        batch.add(q_recv_id, (tx_id_credit, recipient_id, str(sender_id), str(recipient_id), amount, currency, now, now))
-        batch.add(q_recv_user, (recipient_id, now, tx_id_credit, str(sender_id), str(recipient_id), amount, currency, now))
+        # ¡AQUÍ ESTÁ EL ARREGLO! Guardamos el sender_name en el historial del que recibe
+        meta_received = json.dumps({"source_phone": "Confidencial", "sender_name": sender_name})
 
-        # Ejecutamos todo junto
+        # 1. SENT (Remitente)
+        q_sent_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'BDI', %s, 'BDI', %s, 'P2P_SENT', %s, %s, 'COMPLETED', %s, %s, %s)")
+        q_sent_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'BDI', %s, 'BDI', %s, 'P2P_SENT', %s, %s, 'COMPLETED', %s, %s)")
+        
+        batch.add(q_sent_id, (tx_id_debit, sender_id, str(sender_id), str(recipient_id), amount, currency, now, now, meta_sent))
+        batch.add(q_sent_user, (sender_id, now, tx_id_debit, str(sender_id), str(recipient_id), amount, currency, now, meta_sent))
+
+        # 2. RECEIVED (Destinatario)
+        q_recv_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'BDI', %s, 'BDI', %s, 'P2P_RECEIVED', %s, %s, 'COMPLETED', %s, %s, %s)")
+        q_recv_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'BDI', %s, 'BDI', %s, 'P2P_RECEIVED', %s, %s, 'COMPLETED', %s, %s)")
+        
+        batch.add(q_recv_id, (tx_id_credit, recipient_id, str(sender_id), str(recipient_id), amount, currency, now, now, meta_received))
+        batch.add(q_recv_user, (recipient_id, now, tx_id_credit, str(sender_id), str(recipient_id), amount, currency, now, meta_received))
+
         db.execute(batch)
-        
-        # Guardamos idempotencia
         db.execute(f"INSERT INTO {KEYSPACE}.idempotency_keys (key, transaction_id) VALUES (%s, %s)", (uuid.UUID(idempotency_key), tx_id_debit))
-
         LEDGER_P2P_TRANSFERS_TOTAL.inc()
 
         tx_data = await get_transaction_by_id(db, tx_id_debit)
         return schemas.Transaction(**tx_data)
 
     except Exception as e:
-        logger.critical(f"¡FALLO CRÍTICO POST-SAGA! Dinero movido pero error en Cassandra: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "La transferencia se completó pero hubo un error al guardarla en el historial.")
+        logger.critical(f"Error Cassandra: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error guardando historial.")
 
-
-# ... (después de tu función 'get_daily_balance'...)
 
 @app.post("/transfers/inbound-central", status_code=200, tags=["Central API"])
 async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
