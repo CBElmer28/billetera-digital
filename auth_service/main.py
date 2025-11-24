@@ -437,7 +437,7 @@ def get_users_bulk(req: schemas.UserBulkRequest, db: Session = Depends(get_db)):
 
 @app.post("/request-password-reset", status_code=200)
 async def request_password_reset(
-    request: PasswordResetRequest, 
+    request: schemas.PasswordResetRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
@@ -458,7 +458,7 @@ async def request_password_reset(
 # Endpoint 2: Confirmar cambio
 @app.post("/reset-password", status_code=200)
 async def reset_password(
-    request: PasswordResetConfirm,
+    request: schemas.PasswordResetConfirm,
     db: Session = Depends(get_db)
 ):
     # 1. Validar que las contraseñas coincidan
