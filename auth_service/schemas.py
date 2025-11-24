@@ -16,8 +16,8 @@ class UserCreate(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
-    dni: str # <--- Agregamos esto
-    name: str # Auth Service lo llenará automáticamente
+    dni: str  
+    name: str 
     email: EmailStr
     phone_number: str | None = None
     

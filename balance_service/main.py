@@ -1,7 +1,7 @@
 import logging
 import time
 import os
-import httpx # <--- ¡Vital para llamar a RENIEC y al Ledger!
+import httpx
 from decimal import Decimal
 from typing import Optional
 
@@ -268,7 +268,7 @@ def get_bank_stats(db: Session = Depends(get_db)):
     return {
         "total_loans_issued": len(paid_loans),
         "total_money_lent": float(total_lent),
-        "total_bank_profit": float(total_profit), # ¡AQUÍ ESTÁ TU GANANCIA!
+        "total_bank_profit": float(total_profit),
         "currency": "PEN"
     }
 

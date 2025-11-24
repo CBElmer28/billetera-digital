@@ -1,7 +1,7 @@
 import enum
 from decimal import Decimal
 from sqlalchemy import Column, Integer, String, Float, UniqueConstraint, ForeignKey, Numeric, DateTime, func, Enum as SQLEnum
-from sqlalchemy.orm import relationship # <-- ¡ESTA ES LA LÍNEA CORRECTA!
+from sqlalchemy.orm import relationship
 
 from db import Base
 # ... (el resto de tu archivo 'models.py' se queda igual) ...

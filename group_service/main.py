@@ -64,8 +64,6 @@ def fetch_user_details_bulk(user_ids: List[int]) -> dict:
             response.raise_for_status()
             users_data = response.json()
 
-            # Convierte la lista de usuarios en un diccionario para búsqueda rápida
-            # ej: {1: "Jorge P", 2: "Amigo Test"}
             return {user['id']: user['name'] for user in users_data}
 
     except Exception as e:
@@ -195,7 +193,6 @@ def create_group(
         logger.error(f"Error interno al crear grupo '{group_in.name}': {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del servidor al crear grupo.")
 
-# REEMPLAZA tu función get_my_groups entera con esto:
 
 @app.get("/groups/me", response_model=List[schemas.GroupResponse], tags=["Groups"])
 def get_my_groups(
@@ -228,7 +225,7 @@ def get_my_groups(
 
         # 2. Obtener TODOS los IDs de TODOS los miembros de TODOS los grupos
         all_member_ids = set()
-        for group in groups_db: # <-- Usamos groups_db
+        for group in groups_db: 
             for member in group.members:
                 all_member_ids.add(member.user_id)
 
@@ -237,7 +234,7 @@ def get_my_groups(
 
         # 4. Fusionar los datos
         response_list = []
-        for group in groups_db: # <-- Usamos groups_db
+        for group in groups_db:
             # Convertimos el objeto SQLAlchemy (group) a un diccionario Pydantic (schema)
             group_schema = schemas.GroupResponse.model_validate(group)
 
@@ -519,8 +516,6 @@ def delete_group(
     except httpx.RequestError as e:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Error de red al contactar Balance Service: {e}")
 
-    # ... (después de la verificación de saldo de httpx) ...
-
     # 4. ¡Todo en orden! Eliminar
     try:
         # group.members ya fue cargado por el 'joinedload' al inicio de la función
@@ -551,8 +546,8 @@ def delete_group(
 @app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
 def invite_member(
     group_id: int, 
-    invite_in: schemas.GroupInviteRequest, # <-- Recibe 'phone_number_to_invite'
-    x_user_id: int = Header(..., alias="X-User-ID"), # Este es el LÍDER (quien invita)
+    invite_in: schemas.GroupInviteRequest, 
+    x_user_id: int = Header(..., alias="X-User-ID"), 
     db: Session = Depends(get_db)
 ):
     """
@@ -662,7 +657,6 @@ def get_group_details(
          logger.warning(f"Acceso denegado: Usuario {requesting_user_id} intentó ver grupo {group_id} (no es miembro).")
          raise HTTPException(status.HTTP_403_FORBIDDEN, "Acceso denegado. No eres miembro de este grupo.")
 
-    # --- ¡INICIO DE LA NUEVA LÓGICA! ---
     # 1. Obtener todos los IDs de los miembros
     member_ids = [member.user_id for member in group.members]
 
@@ -680,10 +674,8 @@ def get_group_details(
     logger.info(f"Devolviendo detalles enriquecidos del grupo {group_id}")
     return group_response
     # --- FIN DE LA NUEVA LÓGICA ---
-# ... (después de la función get_group_details)
 
 
-# ... (después de 'delete_group')
 
 @app.post("/groups/{group_id}/request-withdrawal", response_model=schemas.WithdrawalRequestResponse, status_code=status.HTTP_201_CREATED, tags=["Junta (Retiros)"])
 def create_withdrawal_request(
@@ -883,7 +875,7 @@ def get_withdrawal_requests(
 @app.post("/groups/{group_id}/leader-withdrawal", tags=["Junta (Retiros)"])
 def leader_execute_withdrawal(
     group_id: int,
-    req: schemas.LeaderWithdrawalRequest, # <-- Usa el nuevo schema
+    req: schemas.LeaderWithdrawalRequest, 
     x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
     db: Session = Depends(get_db)
 ):

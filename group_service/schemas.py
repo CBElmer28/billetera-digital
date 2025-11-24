@@ -31,8 +31,8 @@ class GroupMemberResponse(BaseModel):
     """
     user_id: int
     name: str = "Nombre no encontrado"
-    role: GroupRole # Muestra el rol ('leader' o 'member')
-    group_id: int  # <-- El campo que faltaba en la definición duplicada
+    role: GroupRole 
+    group_id: int 
     status: GroupMemberStatus
     internal_balance: Decimal
 

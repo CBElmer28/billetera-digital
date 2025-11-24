@@ -3,10 +3,10 @@
 """Modelos Pydantic (schemas) para el Balance Service."""
 
 from pydantic import BaseModel, Field, ConfigDict
-from decimal import Decimal       # <-- ¡Importación clave!
-from datetime import datetime     # <-- ¡Importación clave!
-from typing import Optional       # <-- ¡Importación clave!
-from models import LoanStatus     # <-- ¡Importación clave!
+from decimal import Decimal     
+from datetime import datetime     
+from typing import Optional     
+from models import LoanStatus     
 
 # --- Schemas de Cuenta Individual (BDI) ---
 
@@ -15,7 +15,7 @@ class AccountCreate(BaseModel):
 
 class BalanceUpdate(BaseModel):
     user_id: int
-    amount: float # El 'float' se convertirá a Decimal en main.py
+    amount: float
 
 class BalanceCheck(BaseModel):
     user_id: int

@@ -132,7 +132,7 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     hashed_password = get_password_hash(user.password)
     new_user = User(
         dni=user.dni,
-        name=real_name, # <-- Aquí ocurre la magia
+        name=real_name,
         email=user.email,
         phone_number=user.phone_number,
         hashed_password=hashed_password
@@ -307,7 +307,7 @@ def change_user_password(
 @app.post("/users/{user_id}/verify-password", tags=["Internal"])
 def verify_password_endpoint(
     user_id: int,
-    check: schemas.PasswordCheck,  # <--- NOTA: Se usa el prefijo 'schemas.'
+    check: schemas.PasswordCheck,
     db: Session = Depends(get_db)
 ):
     """

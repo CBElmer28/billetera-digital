@@ -285,10 +285,6 @@ async def forward_request(request: Request, target_url: str, inject_user_id: boo
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del Gateway")
 
 
-# gateway_service/main.py
-
-# gateway_service/main.py
-
 @app.get("/p2p/directory/{phone_number}", tags=["P2P", "Directory"])
 async def resolve_destination_options(
     phone_number: str,
@@ -296,135 +292,77 @@ async def resolve_destination_options(
     user_id: int = Depends(get_current_user_id)
 ):
     """
-    Directorio Inteligente:
-    1. Consulta a Auth Service (¿Es cliente local?).
-    2. Consulta a API Central (¿Tiene otros bancos?).
-    3. Mezcla los resultados.
+    Directorio Inteligente (Versión Robusta con Logs).
     """
     if not phone_number.isdigit() or len(phone_number) < 9:
          raise HTTPException(status.HTTP_400_BAD_REQUEST, "Número de celular inválido")
 
-    # Lista final de opciones (usamos set para evitar duplicados)
+    # Lista final de opciones
     available_options = set()
     user_name_display = "Usuario Desconocido"
 
     # --- PASO 1: Consulta Local (Auth Service) ---
-    # Preguntamos: ¿Este número está registrado en Pixel Money?
     try:
-        # Usamos el cliente interno para llamar a Auth
         local_res = await client.get(f"{AUTH_URL}/users/by-phone/{phone_number}")
         if local_res.status_code == 200:
-            available_options.add(APP_NAME) # Agregamos "PIXEL MONEY"
+            available_options.add(APP_NAME) 
             local_data = local_res.json()
             user_name_display = local_data.get("name", user_name_display)
+            logger.info(f"Directorio: Encontrado localmente {phone_number}")
     except Exception as e:
         logger.warning(f"Fallo consulta local de directorio: {e}")
 
     # --- PASO 2: Consulta Externa (API Central) ---
-    central_url = os.getenv("CENTRAL_API_URL")
+    raw_central_url = os.getenv("CENTRAL_API_URL")
     central_token = os.getenv("CENTRAL_WALLET_TOKEN")
     auth_header = request.headers.get("Authorization")
 
-    if central_url and central_token:
+    if raw_central_url and central_token:
         try:
+            # CORRECCIÓN 1: Quitar slash final si existe para evitar //wallets
+            central_url = raw_central_url.rstrip("/")
             target = f"{central_url}/wallets/{phone_number}"
-            headers = {"x-wallet-token": central_token, "Authorization": auth_header}
             
-            # Usamos un cliente con timeout corto para no bloquear si la central es lenta
-            async with httpx.AsyncClient(timeout=3.0) as external_client:
+            headers = {
+                "x-wallet-token": central_token, 
+                "Authorization": auth_header
+            }
+            
+            logger.info(f"Directorio: Consultando externa -> {target}")
+
+            # CORRECCIÓN 2: Timeout aumentado a 15 segundos
+            async with httpx.AsyncClient(timeout=15.0) as external_client:
                 ext_res = await external_client.get(target, headers=headers)
                 
+                logger.info(f"Directorio: Respuesta externa {ext_res.status_code}")
+
                 if ext_res.status_code == 200:
                     data = ext_res.json()
+                    # Log para ver qué devuelve realmente la central
+                    logger.info(f"Directorio: Data externa recibida: {data}") 
+
                     wallets = data.get("data", [])
                     if not isinstance(wallets, list): wallets = [wallets]
 
                     for w in wallets:
                         if "appName" in w:
                             available_options.add(w["appName"])
-                            # Si no teníamos nombre local, usamos el de la central
-                            if user_name_display == "Usuario Desconocido":
-                                user_name_display = w.get("userName", "Usuario")
+                            # Priorizamos el nombre de la central si no lo tenemos
+                            if user_name_display == "Usuario Desconocido" or user_name_display == "Usuario":
+                                user_name_display = w.get("userName", user_name_display)
 
         except Exception as e:
-            logger.error(f"Error consultando directorio central: {e}")
-            # No fallamos, solo no agregamos las externas
+            # Imprimimos el error real para que lo veas en los logs de Koyeb
+            logger.error(f"Error CRÍTICO consultando directorio central: {e}")
+    else:
+        logger.warning("Directorio: Variables de entorno CENTRAL_API_URL o TOKEN faltantes.")
 
     # --- PASO 3: Resultado ---
     return {
         "phone": phone_number,
         "name": user_name_display,
-        "options": list(available_options) # Convertimos set a lista
-    }
-
-
-
-# gateway_service/main.py
-
-@app.get("/p2p/directory/{phone_number}", tags=["P2P", "Directory"])
-async def resolve_destination_options(
-    phone_number: str,
-    request: Request,
-    user_id: int = Depends(get_current_user_id)
-):
-    """
-    Consulta a la API Central qué billeteras tiene este número.
-    Retorna: Lista de bancos disponibles (ej: ['LUCA', 'PIXEL MONEY']).
-    """
-    # Validación básica
-    if not phone_number.isdigit() or len(phone_number) < 9:
-         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Número de celular inválido")
-
-    # Obtenemos config de la API Central
-    central_url = os.getenv("CENTRAL_API_URL") 
-    central_token = os.getenv("CENTRAL_WALLET_TOKEN")
-    auth_header = request.headers.get("Authorization") # Usamos el token del usuario actual
-
-    if not central_url or not central_token:
-        logger.error("Configuración de API Central incompleta en Gateway.")
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Servicio de directorio no disponible")
-
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            # Endpoint de la API Central: GET /wallets/{userIdentifier}
-            target = f"{central_url}/wallets/{phone_number}"
-            
-            headers = {
-                "x-wallet-token": central_token,
-                "Authorization": auth_header 
-            }
-            
-            response = await client.get(target, headers=headers)
-            
-            if response.status_code == 404:
-                # El número no existe en la Central -> No tiene billeteras
-                return {"phone": phone_number, "options": []}
-            
-            response.raise_for_status()
-            
-            data = response.json()
-            # La API devuelve: { data: [ {appName: 'LUCA', ...}, ... ] } o directo la lista dependiendo la versión
-            wallets = data.get("data", [])
-            if not isinstance(wallets, list): 
-                wallets = [wallets] # Por si devuelve un solo objeto
-
-            # Extraemos opciones
-            options = [w["appName"] for w in wallets if "appName" in w]
-            
-            # Extraemos nombre (del primer resultado)
-            user_name = wallets[0].get("userName", "Usuario") if wallets else "Desconocido"
-
-            return {
-                "phone": phone_number,
-                "name": user_name, 
-                "options": options
-            }
-
-    except Exception as e:
-        logger.error(f"Error consultando directorio central: {e}")
-        # Fallback por si la central falla: Asumimos que es interno (PIXEL MONEY)
-        return {"phone": phone_number, "name": "Usuario (Offline)", "options": ["PIXEL MONEY"]}
-
+        "options": list(available_options)
+    }
 
 
 # --- Endpoints Públicos (Proxy para Auth) ---
