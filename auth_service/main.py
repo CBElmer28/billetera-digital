@@ -222,7 +222,7 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
     token_data = {
         "sub": str(user.id),
         "name": user.name,
-        "session_id": new_session_id # <--- Clave para la validación
+        "session_id": new_session_id 
     }
 
     access_token = create_access_token(data=token_data)

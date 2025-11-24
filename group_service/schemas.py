@@ -44,7 +44,7 @@ class GroupResponse(BaseModel):
     id: int
     name: str
     leader_user_id: int
-    created_at: datetime # <-- ¡AÑADE ESTA LÍNEA!
+    created_at: datetime 
     members: List[GroupMemberResponse] = []
 
     model_config = ConfigDict(from_attributes=True)

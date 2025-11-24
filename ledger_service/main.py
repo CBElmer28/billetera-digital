@@ -239,7 +239,7 @@ async def deposit(
         db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s", (status_final, datetime.now(timezone.utc), tx_id))
         db.execute(f"UPDATE {KEYSPACE}.transactions_by_user SET status = %s, updated_at = %s WHERE user_id = %s AND created_at = %s AND id = %s", (status_final, datetime.now(timezone.utc), req.user_id, now, tx_id)) # ¡Fix! Añadido update
 
-        DEPOSIT_COUNT.inc() # <-- ¡MÉTRICA CORREGIDA!
+        DEPOSIT_COUNT.inc() 
 
         logger.info(f"Depósito {status_final} para user_id {req.user_id}, tx_id {tx_id}")
     except Exception as final_e:
@@ -512,7 +512,7 @@ async def contribute_to_group(
         db.execute(batch)
         db.execute(f"INSERT INTO {KEYSPACE}.idempotency_keys (key, transaction_id) VALUES (%s, %s)", (uuid.UUID(idempotency_key), tx_id_sent))
 
-        CONTRIBUTION_COUNT.inc() # <-- ¡MÉTRICA CORREGIDA!
+        CONTRIBUTION_COUNT.inc() 
 
         tx_data = await get_transaction_by_id(db, tx_id_sent)
         if not tx_data: raise Exception("No se pudo recuperar la transacción final")
@@ -973,7 +973,7 @@ async def send_money_central(
             
             # 2d. POST a /sendTransfer (Nueva URL)
             central_res = await client.post(
-                f"{CENTRAL_API_URL}/sendTransfer", # <--- CAMBIO AQUÍ
+                f"{CENTRAL_API_URL}/sendTransfer", 
                 json=central_payload,
                 headers=central_headers
             )
