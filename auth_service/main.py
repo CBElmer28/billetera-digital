@@ -1,7 +1,8 @@
 import logging
 import time
 import os
-import httpx
+import httpx 
+import uuid 
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import Response
@@ -196,8 +197,7 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 @app.post("/login", response_model=schemas.Token, tags=["Authentication"])
 def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()):
     """
-    Authenticates a user based on email (as username) and password (form-data).
-    Returns a JWT access token upon successful authentication.
+    Autentica al usuario y genera una Single Active Session.
     """
     logger.info(f"Login attempt for user: {form_data.username}")
     user = db.query(User).filter(User.email == form_data.username).first()
@@ -210,18 +210,24 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-  
-        # Preparamos el payload del token (¡EL ESTÁNDAR!)
-    # El 'sub' (subject) es el ID del usuario.
+    # 1. Generar un nuevo Session ID único
+    new_session_id = str(uuid.uuid4())
+
+    # 2. Guardarlo en la base de datos (Esto invalida cualquier sesión anterior)
+    user.session_id = new_session_id
+    db.commit() # Guardamos cambios
+    db.refresh(user)
+
+    # 3. Incluir el session_id en el token JWT
     token_data = {
         "sub": str(user.id),
-        "name": user.name # Añadimos el nombre para el frontend
+        "name": user.name,
+        "session_id": new_session_id # <--- Clave para la validación
     }
 
     access_token = create_access_token(data=token_data)
-    logger.info(f"Login successful for user_id: {user.id}")
+    logger.info(f"Login successful for user_id: {user.id}. Session ID: {new_session_id}")
 
-    # ¡Devolvemos el objeto COMPLETO que el schema espera!
     return {
         "access_token": access_token, 
         "token_type": "bearer",
@@ -256,22 +262,43 @@ async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
     return user
 
 @app.get("/verify", response_model=schemas.TokenPayload, tags=["Internal"])
-def verify(token: str): 
+def verify(token: str, db: Session = Depends(get_db)): 
     """
-    Valida un token JWT (pasado como query parameter 'token') y devuelve su payload.
-    Usado por el API Gateway.
+    Valida el token y asegura que corresponda a la sesión activa actual.
     """
-    payload = decode_token(token)
-    if payload is None or "sub" not in payload: # Doble verificación
-     logger.warning("Intento de verificación con token inválido, expirado o sin 'sub'.")
-     raise HTTPException(
-         status_code=status.HTTP_401_UNAUTHORIZED,
-         detail="Invalid or expired token",
-     )
+    # 1. Decodificar token (Valida firma y expiración)
+    payload_dict = decode_token(token)
+    
+    if payload_dict is None or "sub" not in payload_dict:
+        logger.warning("Token inválido, expirado o sin 'sub'.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
 
-    # Devolvemos el payload que SÍ coincide con schemas.TokenPayload
-    # (El gateway_service ahora leerá 'sub' sin problemas)
-    return {"sub": payload.get("sub"), "exp": payload.get("exp"), "name": payload.get("name")}
+    user_id = payload_dict.get("sub")
+    token_session_id = payload_dict.get("session_id")
+
+    # 2. Verificar contra la base de datos
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario no existe")
+
+    # 3. COMPARACIÓN CRÍTICA: ¿Es el session_id del token igual al de la BD?
+    if user.session_id != token_session_id:
+        logger.warning(f"Intento de uso de sesión invalidada para user {user_id}. Token: {token_session_id} vs DB: {user.session_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sesión expirada o iniciada en otro dispositivo"
+        )
+
+    return {
+        "sub": str(user_id), 
+        "exp": payload_dict.get("exp"), 
+        "name": payload_dict.get("name"),
+        "session_id": token_session_id
+    }
 
 @app.post("/users/{user_id}/change-password", tags=["Users"])
 def change_user_password(

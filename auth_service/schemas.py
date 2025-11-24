@@ -41,6 +41,7 @@ class TokenPayload(BaseModel):
     sub: Optional[str] = None
     exp: Optional[int] = None
     name: Optional[str] = None
+    session_id: Optional[str] = None
 
 class UserBulkRequest(BaseModel):
     user_ids: List[int]
