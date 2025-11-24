@@ -293,7 +293,9 @@ async def resolve_destination_options(
     """
     Directorio Inteligente (Versión Robusta con Logs).
     """
-    if not phone_number.isdigit() or len(phone_number) < 9:
+    clean_phone= phone_number.strip()
+
+    if not clean_phone.isdigit() or len(clean_phone) < 9:
          raise HTTPException(status.HTTP_400_BAD_REQUEST, "Número de celular inválido")
 
     # Lista final de opciones
@@ -302,12 +304,12 @@ async def resolve_destination_options(
 
     # --- PASO 1: Consulta Local (Auth Service) ---
     try:
-        local_res = await client.get(f"{AUTH_URL}/users/by-phone/{phone_number}")
+        local_res = await client.get(f"{AUTH_URL}/users/by-phone/{clean_phone}")
         if local_res.status_code == 200:
             available_options.add(APP_NAME) 
             local_data = local_res.json()
             user_name_display = local_data.get("name", user_name_display)
-            logger.info(f"Directorio: Encontrado localmente {phone_number}")
+            logger.info(f"Directorio: Encontrado localmente {clean_phone}")
     except Exception as e:
         logger.warning(f"Fallo consulta local de directorio: {e}")
 
@@ -320,7 +322,7 @@ async def resolve_destination_options(
         try:
             # CORRECCIÓN 1: Quitar slash final si existe para evitar //wallets
             central_url = raw_central_url.rstrip("/")
-            target = f"{central_url}/wallets/{phone_number}"
+            target = f"{central_url}/wallets/{clean_phone}"
             
             headers = {
                 "x-wallet-token": central_token, 
@@ -358,7 +360,7 @@ async def resolve_destination_options(
 
     # --- PASO 3: Resultado ---
     return {
-        "phone": phone_number,
+        "phone": clean_phone,
         "name": user_name_display,
         "options": list(available_options)
     }
