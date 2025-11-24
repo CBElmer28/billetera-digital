@@ -893,55 +893,55 @@ async def receive_central_deposit(request: Request):
 # gateway_service/main.py
 
 @app.post("/ledger/transfer-central", tags=["Ledger"])
-async def proxy_transfer_central(
-    request: Request, 
-    user_id: int = Depends(get_current_user_id)
-):
-    """
-    Proxy seguro CORREGIDO:
-    1. Valida password.
-    2. Inyecta user_id en el BODY (¡Esto faltaba!).
-    3. Reenvía al Ledger.
-    """
-    # 1. Leer el cuerpo
+async def proxy_transfer_central(request: Request, user_id: int = Depends(get_current_user_id)):
     try:
         body = await request.json()
     except:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Body inválido")
 
-    # 2. Extraer y Validar Contraseña
+    # 1. Validación Seguridad
     password = body.pop("confirmationPassword", None)
-    
     if not password:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Se requiere contraseña de confirmación (confirmationPassword)")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Falta contraseña")
 
-    verify_url = f"{AUTH_URL}/users/{user_id}/verify-password"
     try:
-        verify_res = await client.post(verify_url, json={"password": password})
+        verify_res = await client.post(f"{AUTH_URL}/users/{user_id}/verify-password", json={"password": password})
         if verify_res.status_code != 200:
-             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Contraseña de confirmación incorrecta")
+             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Contraseña incorrecta")
     except httpx.RequestError:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No se pudo verificar la seguridad (Auth caído)")
+        # Si Auth está dormido, esto fallará. Pero el usuario reintentará.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Auth no responde")
 
-    
     body["user_id"] = user_id 
-
-    logger.info(f"Password confirmado. Reenviando transferencia central para user {user_id}")
-    
-    ledger_target = f"{LEDGER_URL}/transfers/outbound-central"
-    
-    # Headers para el Ledger
     headers = {
         "X-User-Id": str(user_id),
         "Authorization": request.headers.get("Authorization"),
         "Idempotency-Key": request.headers.get("Idempotency-Key", "")
     }
-
     
-    resp = await client.post(ledger_target, json=body, headers=headers)
+    # 2. RUTEO INTELIGENTE
+    to_bank = body.get("to_bank")
     
-    return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+    # Si el destino es NUESTRO banco, usamos el canal interno P2P
+    # Evitamos ir a la Central para que no nos rebote con 404
+    if to_bank == APP_NAME:
+        logger.info(f"Ruteando transferencia interna (P2P) para user {user_id}")
+        target_url = f"{LEDGER_URL}/transfer/p2p"
+    else:
+        logger.info(f"Ruteando transferencia externa (Central) a {to_bank}")
+        target_url = f"{LEDGER_URL}/transfers/outbound-central"
 
+    # 3. Reenvío con Reintentos
+    MAX_RETRIES = 5
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = await client.post(target_url, json=body, headers=headers)
+            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+        except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(2 * attempt)
+            else:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Ledger no responde")
 
 
 @app.get("/bank/stats", tags=["Bank Admin"])
