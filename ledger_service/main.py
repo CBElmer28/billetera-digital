@@ -785,14 +785,14 @@ async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
     try:
         # La Central envía 'internalWalletId' como string, pero tu sistema usa int.
         # Si falla la conversión, es un intento inválido.
-        internal_user_id = int(payload.get("internalWalletId")) 
+        internal_user_id = payload.get("internalWalletId") 
         
         amount = float(payload.get("monto"))
         if amount <= 0:
             raise ValueError("El monto debe ser positivo")
 
         central_tx_id = payload.get("centralTransactionId")
-        from_app_name = payload.get("fromAppName", "CentralAPI") # Quién nos envía
+        from_app_name = payload.get("fromAppName", "CentralAPI")
         from_user_name = payload.get("fromUserName", "Desconocido")
         
         # ¡CRÍTICO! Validar que traiga un ID de transacción central para evitar duplicados
