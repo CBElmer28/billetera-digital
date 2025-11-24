@@ -2,7 +2,8 @@
 
 import os
 import logging
-import bcrypt
+import httpx 
+import bcrypt 
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -110,7 +111,7 @@ async def register_user_in_central(user_id: int, phone_number: str, user_name: s
     
     payload = {
         "userIdentifier": phone_number,
-        "internalWalletId": str(user_id),
+        "internalWalletId": user_id,
         "userName": user_name,
         "appName": APP_NAME
     }

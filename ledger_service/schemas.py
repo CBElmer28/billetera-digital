@@ -20,6 +20,7 @@ class TransferRequest(BaseModel):
     to_bank: str = Field(..., description="Banco destino (ej. 'HAPPY_MONEY')")
     # Identificador del destinatario en el otro banco (número de celular).
     destination_phone_number: str = Field(..., min_length=9, max_length=15, description="Número de celular del destinatario.")
+    description: Optional[str] = None
 
 class ContributionRequest(BaseModel):
     """Schema para la solicitud de aporte BDI -> BDG (Billetera Grupal)."""

@@ -771,59 +771,96 @@ async def transfer_p2p(
 @app.post("/transfers/inbound-central", status_code=200, tags=["Central API"])
 async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
     """
-    Webhook que procesa depósitos provenientes de la API Centralizada.
-    Orquesta: Recepción -> Balance Service (Crédito) -> Cassandra (Historial).
+    WEBHOOK DE RECEPCIÓN (Inbound):
+    Recibe notificaciones de dinero entrante desde la API Central.
+    Flujo:
+    1. Validar payload (seguridad y datos).
+    2. Acreditar saldo al usuario local (Balance Service).
+    3. Registrar transacción en Cassandra.
+    4. Confirmar éxito a la Central.
     """
-    # 1. Extraer datos del payload estándar de la Central
-    try:
-        internal_user_id = int(payload.get("internalWalletId")) # Tu ID local
-        amount = float(payload.get("monto"))
-        central_tx_id = payload.get("centralTransactionId")
-        from_app_name = payload.get("fromAppName", "CentralAPI")
-    except (ValueError, TypeError) as e:
-        logger.error(f"Datos inválidos en webhook central: {e}")
-        raise HTTPException(status_code=400, detail="Payload inválido")
+    logger.info(f"Webhook Central recibido. Payload: {payload}")
 
+    # --- PASO 1: Extracción y Validación de Datos ---
+    try:
+        # La Central envía 'internalWalletId' como string, pero tu sistema usa int.
+        # Si falla la conversión, es un intento inválido.
+        internal_user_id = int(payload.get("internalWalletId")) 
+        
+        amount = float(payload.get("monto"))
+        if amount <= 0:
+            raise ValueError("El monto debe ser positivo")
+
+        central_tx_id = payload.get("centralTransactionId")
+        from_app_name = payload.get("fromAppName", "CentralAPI") # Quién nos envía
+        from_user_name = payload.get("fromUserName", "Desconocido")
+        
+        # ¡CRÍTICO! Validar que traiga un ID de transacción central para evitar duplicados
+        if not central_tx_id:
+            raise ValueError("Falta centralTransactionId")
+
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Payload inválido en webhook central: {e}")
+        # 400 le dice a la Central: "Tu petición está mal formada, no la reintentes"
+        raise HTTPException(status_code=400, detail=f"Datos inválidos: {str(e)}")
+
+    # --- PASO 2: Idempotencia (Evitar doble gasto) ---
+    # Consultamos a Cassandra si ya procesamos este central_tx_id
+    # (Nota: Esto requiere una tabla auxiliar o índice en Cassandra. 
+    # Por simplicidad ahora, confiamos en que si la inserción final falla, no acreditamos doble)
+    
     tx_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
     currency = "PEN"
     
+    # Metadatos para auditoría
     metadata = {
         "central_tx_id": central_tx_id,
         "from_app": from_app_name,
-        "description": payload.get("descripcion", "Transferencia externa")
+        "from_user": from_user_name,
+        "description": payload.get("descripcion", "Transferencia Interbancaria")
     }
     metadata_json = json.dumps(metadata)
 
-    # 2. SAGA: Acreditar Saldo (Llamada a Balance Service)
+    # --- PASO 3: SAGA - Acreditar Saldo (Balance Service) ---
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
+            # Llamamos a nuestro microservicio de Balance
             res = await client.post(
                 f"{BALANCE_SERVICE_URL}/balance/credit",
                 json={"user_id": internal_user_id, "amount": amount}
             )
             res.raise_for_status()
+            logger.info(f"Saldo acreditado a usuario {internal_user_id} por {amount}")
+
         except httpx.HTTPStatusError as e:
-            logger.error(f"Fallo al acreditar saldo central para user {internal_user_id}: {e.response.text}")
-            # Si el usuario no existe o hay error lógico
-            raise HTTPException(status_code=404, detail="Usuario no encontrado o error de saldo")
+            if e.response.status_code == 404:
+                logger.error(f"Usuario destino {internal_user_id} no existe en Balance.")
+                # 404 le dice a la Central: "El destinatario no existe, devuélvele la plata al remitente"
+                raise HTTPException(status_code=404, detail="Usuario no encontrado")
+            else:
+                logger.error(f"Error interno Balance: {e.response.text}")
+                # 500 le dice a la Central: "Tengo problemas, reintenta más tarde"
+                raise HTTPException(status_code=503, detail="Error interno procesando saldo")
         except Exception as e:
             logger.error(f"Error de conexión Balance Service: {e}")
-            raise HTTPException(status_code=503, detail="Error interno procesando saldo")
+            raise HTTPException(status_code=503, detail="Error de conexión interno")
 
-    # 3. Registrar en Cassandra (Historial)
+    # --- PASO 4: Registrar en Historial (Cassandra) ---
     try:
         decimal_amount = Decimal(str(amount))
         status_final = "COMPLETED"
         
         batch = BatchStatement()
         
-        # Insertar en tabla principal
+        # 1. Tabla Principal (Log global)
         q_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'CENTRAL_API', %s, 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s, %s)")
         
-        # Insertar en tabla por usuario
+        # 2. Tabla por Usuario (Para que Pepe vea su historial)
         q_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'CENTRAL_API', %s, 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s)")
 
+        # Source Wallet ID = Nombre de la App que envía (ej: "LUCA")
+        # Destination Wallet ID = ID interno del usuario
         batch.add(q_id, (tx_id, internal_user_id, from_app_name, str(internal_user_id), decimal_amount, currency, status_final, now, now, metadata_json))
         batch.add(q_user, (internal_user_id, now, tx_id, from_app_name, str(internal_user_id), decimal_amount, currency, status_final, now, metadata_json))
 
@@ -831,10 +868,13 @@ async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
         DEPOSIT_COUNT.inc() 
 
     except Exception as e:
-        # El dinero ya se acreditó, solo falló el log. Es crítico pero no bloqueante para la respuesta.
-        logger.critical(f"Dinero central acreditado pero fallo en Cassandra tx {tx_id}: {e}", exc_info=True)
+        # CASO CRÍTICO: El dinero ya se acreditó (Paso 3), pero falló el log (Paso 4).
+        # No podemos devolver error a la Central porque revertiría la operación y duplicaríamos saldo.
+        # Solo logueamos el error crítico para revisión manual.
+        logger.critical(f"¡DATA INCONSISTENCY! Dinero acreditado (Tx Central: {central_tx_id}) pero fallo en Cassandra: {e}", exc_info=True)
     
-    # 4. Respuesta estricta requerida por la API Central
+    # --- PASO 5: Confirmación ---
+    # Respondemos el JSON que la API Central espera para marcar la tx como COMPLETED
     return {
         "success": True,
         "localTransactionId": str(tx_id)
@@ -842,157 +882,149 @@ async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
 
 @app.post("/transfers/outbound-central", status_code=201, tags=["Central API"])
 async def send_money_central(
-    req: schemas.TransferRequest, # Reutilizamos tu esquema existente
+    req: schemas.TransferRequest, 
     user_id: int = Header(..., alias="X-User-ID"),
-    auth_token: str = Header(..., alias="Authorization"), # Recibimos el token del usuario
+    auth_token: str = Header(..., alias="Authorization"),
     db: Session = Depends(get_db)
 ):
     """
-    Envía dinero a través del Hub Centralizado.
-    SAGA: 
-    1. Debita saldo local (Balance Service).
-    2. Llama a API Central (/transfer).
-    3. Si falla, revierte el débito.
-    4. Registra en Cassandra.
+    Envía dinero a la API Centralizada (Versión Desplegada).
+    Endpoint: /api/v1/sendTransfer
     """
     
-    # Cargar variables dentro de la función para asegurar que estén actualizadas
     CENTRAL_API_URL = os.getenv("CENTRAL_API_URL")
-    CENTRAL_WALLET_TOKEN = os.getenv("CENTRAL_WALLET_TOKEN") # "pixel-token"
+    CENTRAL_WALLET_TOKEN = os.getenv("CENTRAL_WALLET_TOKEN")
 
-    # Validar configuración crítica
     if not CENTRAL_API_URL or not CENTRAL_WALLET_TOKEN:
-        logger.critical("Configuración de API Central incompleta en Ledger Service.")
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Servicio de transferencia no disponible temporalmente.")
+        logger.critical("Configuración Central incompleta.")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Servicio no disponible")
 
     tx_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
     currency = "PEN"
     
-    # Mapeo de datos del request a la API Central
-    # req.destination_phone_number -> toIdentifier
-    # req.to_bank -> toAppName (El frontend debe enviar el nombre exacto, ej: "Khipu")
-    
+    # Metadatos iniciales
     metadata = {
         "to_app": req.to_bank, 
         "destination": req.destination_phone_number,
         "description": req.description
     }
-    metadata_json = json.dumps(metadata)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        # --- PASO 1: Debitar Usuario Local ---
+        # --- PASO 1: Debitar Usuario Local (Balance Service) ---
         try:
-            # Verificamos fondos y debitamos
-            # Nota: Balance Service ya valida fondos y devuelve 400 si son insuficientes
             debit_res = await client.post(
                 f"{BALANCE_SERVICE_URL}/balance/debit",
                 json={"user_id": user_id, "amount": req.amount}
             )
             debit_res.raise_for_status()
         except httpx.HTTPStatusError as e:
-            detail = "Error al procesar el débito."
-            try:
-                detail = e.response.json().get("detail", detail)
-            except:
-                pass
-            # Propagamos el error (ej: 400 Fondos Insuficientes) al cliente
+            # 400 = Fondos insuficientes
+            detail = e.response.json().get("detail", "Error de débito") if e.response.content else "Error de débito"
             raise HTTPException(status_code=e.response.status_code, detail=detail)
-        except Exception as e:
-            logger.error(f"Error de conexión con Balance Service: {e}")
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error interno de saldo.")
+        except Exception:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error interno de saldo")
 
         # --- PASO 2: Llamar a API Central ---
-        status_final = "PENDING"
         try:
-            # 2a. Obtener teléfono del remitente (Auth Service)
-            # Necesitamos el "fromIdentifier" para la API Central
+            # 2a. Obtener teléfono del remitente
             auth_res = await client.get(f"{AUTH_SERVICE_URL}/users/{user_id}")
             auth_res.raise_for_status()
             sender_phone = auth_res.json().get("phone_number")
 
             if not sender_phone:
-                 raise Exception("El usuario no tiene un número de teléfono registrado.")
+                 raise Exception("Usuario sin teléfono registrado")
 
-            # 2b. Preparar Payload para Central
+            # 2b. Payload ajustado al Nuevo Contrato
             central_payload = {
                 "fromIdentifier": sender_phone,
                 "toIdentifier": req.destination_phone_number,
                 "toAppName": req.to_bank, 
                 "amount": req.amount,
+                # Enviamos TU uuid local como referencia externa
+                "externalTransactionId": str(tx_id), 
+                # Enviamos descripción si existe, o por defecto
                 "description": req.description or "Transferencia Pixel Money"
             }
 
-            # 2c. Preparar Headers (ESTRICTO SEGÚN ADMIN)
+            # 2c. Headers
             central_headers = {
-                "x-wallet-token": CENTRAL_WALLET_TOKEN, # "pixel-token"
-                "Authorization": auth_token,            # "Bearer eyJhbGciOiJIUzI1Ni..." (Token del usuario)
+                "x-wallet-token": CENTRAL_WALLET_TOKEN, 
+                "Authorization": auth_token,            
                 "Content-Type": "application/json"
             }
 
-            logger.info(f"Enviando a Central ({central_payload['toAppName']}) tx local {tx_id}")
+            logger.info(f"Enviando a Central: {central_payload}")
             
-            # 2d. Llamada a la API Central
+            # 2d. POST a /sendTransfer (Nueva URL)
             central_res = await client.post(
-                f"{CENTRAL_API_URL}/transfer",
+                f"{CENTRAL_API_URL}/sendTransfer", # <--- CAMBIO AQUÍ
                 json=central_payload,
                 headers=central_headers
             )
 
-            if central_res.status_code == 200:
+            # Validar éxito
+            # Aceptamos 200 o 201 como éxito
+            if central_res.status_code in [200, 201]:
                 central_data = central_res.json()
-                status_final = "COMPLETED"
-                metadata["central_tx_id"] = central_data.get("centralTransactionId")
-                logger.info(f"Transferencia Central exitosa. ID: {metadata['central_tx_id']}")
+                
+                # Validar campo 'success' explícitamente
+                if not central_data.get("success"):
+                     raise Exception(f"API Central respondió 200 pero success=false: {central_data}")
+
+                # Como 'data' viene vacía {}, no podemos guardar un ID externo.
+                # Usamos nuestro propio ID como referencia.
+                metadata["central_tx_id"] = "N/A (Ver externalTransactionId)"
+                logger.info(f"Transferencia Central exitosa. Ref: {tx_id}")
             else:
-                # Si la central rechaza (400, 404, etc), lanzamos error para activar el rollback
-                error_detail = central_res.text
+                # Error HTTP (400, 404, 500)
+                error_msg = central_res.text
                 try:
-                    error_detail = central_res.json().get("message", central_res.text)
+                    error_msg = central_res.json().get("message", error_msg)
                 except: pass
-                raise Exception(f"Central API Error ({central_res.status_code}): {error_detail}")
+                raise Exception(f"API Central Error ({central_res.status_code}): {error_msg}")
 
         except Exception as e:
-            logger.error(f"Fallo en envío a Central: {e}. Iniciando REVERSIÓN...")
+            logger.error(f"Fallo Central: {e}. Revirtiendo...")
             
-            # --- REVERSIÓN (COMPENSACIÓN) ---
-            # Devolvemos el dinero al usuario porque la transferencia falló
+            # --- REVERSIÓN (Compensación) ---
             try:
                 await client.post(
                     f"{BALANCE_SERVICE_URL}/balance/credit",
                     json={"user_id": user_id, "amount": req.amount}
                 )
-                logger.info(f"Reversión exitosa para user {user_id} (Monto: {req.amount})")
+                logger.info(f"Reversión exitosa para user {user_id}")
             except Exception as rev_e:
-                logger.critical(f"¡FALLO DE REVERSIÓN CRÍTICO! User {user_id} perdió fondos. Error: {rev_e}")
-                # Aquí deberías enviar una alerta a Slack/Email/Sentry
+                logger.critical(f"FALLO REVERSIÓN CRÍTICO: {rev_e}")
             
-            # Devolvemos error amigable al usuario
-            detail_msg = str(e) if "Central API Error" in str(e) else "No se pudo completar la transferencia externa."
+            # Mensaje limpio al usuario
+            detail_msg = str(e) if "API Central Error" in str(e) else "Error de comunicación con el banco destino."
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=detail_msg)
 
     # --- PASO 3: Registrar en Cassandra ---
     try:
         decimal_amount = Decimal(str(req.amount))
-        batch = BatchStatement()
+        status_final = "COMPLETED"
+        metadata_json = json.dumps(metadata)
         
-        # Log en tabla general
+        batch = BatchStatement()
         q_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'BDI', %s, 'CENTRAL_API', %s, 'TRANSFER_SENT', %s, %s, %s, %s, %s, %s)")
-        # Log en historial de usuario
         q_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'BDI', %s, 'CENTRAL_API', %s, 'TRANSFER_SENT', %s, %s, %s, %s, %s)")
 
-        # Usamos req.to_bank como ID de destino para que sepa a qué banco fue
-        batch.add(q_id, (tx_id, user_id, str(user_id), req.to_bank, decimal_amount, currency, status_final, now, now, json.dumps(metadata)))
-        batch.add(q_user, (user_id, now, tx_id, str(user_id), req.to_bank, decimal_amount, currency, status_final, now, json.dumps(metadata)))
+        batch.add(q_id, (tx_id, user_id, str(user_id), req.to_bank, decimal_amount, currency, status_final, now, now, metadata_json))
+        batch.add(q_user, (user_id, now, tx_id, str(user_id), req.to_bank, decimal_amount, currency, status_final, now, metadata_json))
 
         db.execute(batch)
         TRANSFER_COUNT.inc()
 
     except Exception as e:
-        logger.error(f"Error guardando historial outbound central: {e}")
-        # No fallamos la request porque el dinero ya se fue y la operación financiera terminó
+        logger.error(f"Error guardando historial outbound: {e}")
 
-    return {"status": "COMPLETED", "transaction_id": str(tx_id), "central_tx_id": metadata.get("central_tx_id")}
+    return {
+        "status": "COMPLETED", 
+        "transaction_id": str(tx_id), 
+        "message": "Transferencia enviada exitosamente"
+    }
 
 @app.post("/group-withdrawal", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Internal SAGA"])
 async def execute_group_withdrawal(
