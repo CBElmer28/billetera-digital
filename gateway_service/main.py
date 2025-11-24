@@ -5,6 +5,7 @@ import httpx
 import logging
 import time
 import json
+import asyncio
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Request, HTTPException, status, Header, Depends
@@ -21,7 +22,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # --- URLs de Servicios Internos ---
-# 1. Obtenemos los valores
 AUTH_URL = os.getenv("AUTH_SERVICE_URL")
 BALANCE_URL = os.getenv("BALANCE_SERVICE_URL")
 LEDGER_URL = os.getenv("LEDGER_SERVICE_URL")
@@ -30,7 +30,6 @@ CENTRAL_WALLET_TOKEN = os.getenv("CENTRAL_WALLET_TOKEN")
 
 APP_NAME = os.getenv("APP_NAME", "PIXEL MONEY")
 
-# 2. Creamos un diccionario para validar
 env_vars = {
     "AUTH_SERVICE_URL": AUTH_URL,
     "BALANCE_SERVICE_URL": BALANCE_URL,
@@ -215,6 +214,74 @@ async def get_current_user_id(request: Request) -> int:
         logger.error(f"Error crítico: get_current_user_id llamado en una ruta sin user_id autenticado ({request.url.path})")
         raise HTTPException(status.HTTP_403_FORBIDDEN, "User ID no disponible")
     return user_id
+
+# --- FUNCIÓN CORE: PROXY CON REINTENTOS ---
+
+async def forward_request(request: Request, target_url: str, inject_user_id: bool = False, pass_headers: list = []):
+    """
+    Reenvía peticiones con lógica de RETRY para manejar 'Cold Starts'.
+    Intenta hasta 3 veces si hay Timeout o Error de Conexión.
+    """
+    user_id = getattr(request.state, "user_id", None)
+    
+    headers_to_forward = {}
+    for h in pass_headers:
+        val = request.headers.get(h)
+        if val: headers_to_forward[h] = val
+    if user_id:
+        headers_to_forward["X-User-Id"] = str(user_id)
+
+    # Preparamos el cuerpo/data una sola vez
+    content = None
+    json_body = None
+    data_body = None
+    
+    # Leemos el body si es necesario (solo para métodos con payload)
+    if request.method in ["POST", "PUT", "PATCH"]:
+        ct = request.headers.get("content-type", "").lower()
+        if "application/json" in ct:
+            try:
+                json_body = await request.json()
+                if inject_user_id and user_id:
+                    json_body['user_id'] = user_id
+            except: pass
+        elif "form-urlencoded" in ct:
+            data_body = await request.form()
+        else:
+            content = await request.body()
+
+    # --- BUCLE DE REINTENTOS ---
+    MAX_RETRIES = 3
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info(f"Intento {attempt}/{MAX_RETRIES} -> {target_url}")
+            
+            if json_body is not None:
+                response = await client.request(request.method, target_url, json=json_body, headers=headers_to_forward)
+            elif data_body is not None:
+                response = await client.request(request.method, target_url, data=data_body, headers=headers_to_forward)
+            else:
+                response = await client.request(request.method, target_url, content=content, headers=headers_to_forward)
+
+            # Si llegamos aquí, hubo respuesta (buena o mala, pero respondió)
+            # Reenviamos tal cual.
+            try:
+                return JSONResponse(status_code=response.status_code, content=response.json())
+            except:
+                return Response(status_code=response.status_code, content=response.content)
+
+        except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout) as e:
+            logger.warning(f"Fallo conexión ({e}) con {target_url}. Intento {attempt}")
+            if attempt < MAX_RETRIES:
+                sleep_time = 2 * attempt # Backoff: 2s, 4s...
+                logger.info(f"Esperando {sleep_time}s para reintentar...")
+                await asyncio.sleep(sleep_time)
+            else:
+                logger.error(f"Se agotaron los reintentos para {target_url}")
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "El servicio tardó demasiado en responder. Por favor intenta de nuevo.")
+        except Exception as e:
+            logger.error(f"Error inesperado en proxy: {e}")
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno de comunicación")
 
 
 # --- Endpoints de Salud y Métricas ---
