@@ -284,7 +284,6 @@ async def forward_request(request: Request, target_url: str, inject_user_id: boo
         logger.error(f"Error inesperado al reenviar a {target_url}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del Gateway")
 
-
 @app.get("/p2p/directory/{phone_number}", tags=["P2P", "Directory"])
 async def resolve_destination_options(
     phone_number: str,
@@ -362,7 +361,7 @@ async def resolve_destination_options(
         "phone": phone_number,
         "name": user_name_display,
         "options": list(available_options)
-    }
+    }
 
 
 # --- Endpoints Públicos (Proxy para Auth) ---
