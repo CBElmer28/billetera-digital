@@ -106,7 +106,7 @@ async def get_api_key(api_key: str = Depends(api_key_header)):
 
 
 # --- Cliente HTTP Asíncrono Reutilizable ---
-client = httpx.AsyncClient(timeout=50.0)
+client = httpx.AsyncClient(timeout=30.0)
 
 # --- Métricas Prometheus ---
 REQUEST_COUNT = Counter(
