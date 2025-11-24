@@ -6,29 +6,23 @@ from typing import Optional, List
 # --- Schemas de Usuario ---
 
 class UserCreate(BaseModel):
-    """Schema para los datos requeridos al crear un nuevo usuario."""
-    name: str = Field(..., min_length=3, description="Nombre completo del usuario")
+    """
+    Schema modificado: Pide DNI, NO pide nombre.
+    """
+    dni: str = Field(..., min_length=8, max_length=8, description="DNI del usuario")
     email: EmailStr
-    password: str = Field(..., min_length=8, description="La contraseña debe tener al menos 8 caracteres")
+    password: str = Field(..., min_length=8)
     phone_number: str = Field(..., min_length=9, max_length=15)
 
 class UserResponse(BaseModel):
-    """Schema para los datos devueltos tras la creación exitosa de un usuario (excluye contraseña)."""
     id: int
-    name: str
+    dni: str # <--- Agregamos esto
+    name: str # Auth Service lo llenará automáticamente
     email: EmailStr
     phone_number: str | None = None
-    
-    # Campo del centrall_wallet_id agregado para respuesta
     central_wallet_id: Optional[str] = None 
 
-    # --- CORRECCIÓN AQUÍ ---
-    # Usamos SOLO la configuración de Pydantic v2
     model_config = ConfigDict(from_attributes=True)
-    
-    # BORRAR O COMENTAR ESTO:
-    # class Config:
-    #     orm_mode = True
 
 
 # --- Schemas de Token ---
@@ -54,3 +48,8 @@ class PasswordChangeRequest(BaseModel):
     current_password: str
     new_password: str
     confirm_password: str
+
+
+class PasswordCheck(BaseModel):
+    """Schema para verificar contraseña sin loguear."""
+    password: str
