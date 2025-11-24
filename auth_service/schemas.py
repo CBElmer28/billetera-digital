@@ -20,8 +20,9 @@ class UserResponse(BaseModel):
     name: str # Auth Service lo llenará automáticamente
     email: EmailStr
     phone_number: str | None = None
-    central_wallet_id: Optional[str] = None 
-
+    
+    # --- CORRECCIÓN AQUÍ ---
+    # Usamos SOLO la configuración de Pydantic v2
     model_config = ConfigDict(from_attributes=True)
 
 
