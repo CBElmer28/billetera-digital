@@ -805,9 +805,7 @@ async def process_central_deposit(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Datos inválidos: {str(e)}")
 
     # --- PASO 2: Idempotencia (Evitar doble gasto) ---
-    # Consultamos a Cassandra si ya procesamos este central_tx_id
-    # (Nota: Esto requiere una tabla auxiliar o índice en Cassandra. 
-    # Por simplicidad ahora, confiamos en que si la inserción final falla, no acreditamos doble)
+
     
     tx_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
