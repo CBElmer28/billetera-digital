@@ -19,9 +19,6 @@ class UserResponse(BaseModel):
     email: EmailStr
     phone_number: str | None = None
     
-    # Campo del centrall_wallet_id agregado para respuesta
-    central_wallet_id: Optional[str] = None 
-
     # --- CORRECCIÓN AQUÍ ---
     # Usamos SOLO la configuración de Pydantic v2
     model_config = ConfigDict(from_attributes=True)

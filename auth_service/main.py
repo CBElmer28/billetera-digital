@@ -183,22 +183,12 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     temp_token_for_central = create_access_token(data={"sub": str(new_user.id), "name": new_user.name})
     
     # Usamos la función de utilidad que encapsula la complejidad
-    wallet_uuid = await register_user_in_central(
+    await register_user_in_central(
         user_id=new_user.id,
         phone_number=new_user.phone_number,
         user_name=new_user.name,
         auth_token=temp_token_for_central
     )
-
-    # Si la Central nos devuelve un ID, lo guardamos
-    if wallet_uuid:
-        new_user.central_wallet_id = wallet_uuid
-        try:
-            db.commit() # Actualizamos el usuario con el ID de la central
-            logger.info(f"User {new_user.id} linked to Central Wallet {wallet_uuid}")
-        except Exception as e:
-            logger.error(f"Error saving central_wallet_id: {e}")
-            # No fallamos el registro completo si esto falla, ya que el usuario es funcional localmente
 
     return new_user
 

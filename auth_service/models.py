@@ -11,6 +11,5 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     phone_number = Column(String(20), unique=True, index=True, nullable=True)
     hashed_password = Column(String(255), nullable=False)
-    central_wallet_id = Column(String(100), nullable=True)
     is_active = Column(Boolean, default=True)
     
